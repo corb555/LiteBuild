@@ -1,0 +1,91 @@
+# ===================================================================
+# LiteBuild Configuration for a GDAL Workflow
+# ===================================================================
+# This file defines a build workflow to create and merge GDAL raster layers
+
+# ===  GLOBAL VARIABLES  ===
+GENERAL:
+  PROJECT_NAME: "US"
+  ACTIVE_LAYER: USA
+  PREVIEW: "_prv"
+  DATA_FOLDER: "elevation/"
+  PUBLISH_DIR: /Volumes/Mike EXT/Tile_Data/Mapnik/img
+  QUIET: -q
+  AUTOPUBLISH: true
+
+  # Default parameters for rules, lowest precedence.
+  PARAMETERS:
+    create_hillshade:
+      co:
+        - "COMPRESS=JPEG"
+        - "JPEG_QUALITY=85"
+      compute_edges: true
+    create_color_layer:
+      co:
+        - "COMPRESS=JPEG"
+        - "JPEG_QUALITY=85"
+      compute_edges: true
+    merge_layers:
+      co:
+        - "COMPRESS=JPEG"
+        - "JPEG_QUALITY=85"
+      calc: "numpy.where(((A < 10) | (A > 245)), ((0.8 * (A / 255.) + 0.2) * B), (A / 255.) * B)"
+
+# ===  BUILD TARGETS ===
+TARGETS:
+  USA:
+    PARAMETERS:
+      create_dem:
+        FILES:
+          - 30n120w_20101117_gmted_mea075.tif
+          - 30n150w_20101117_gmted_mea075.tif
+        EXTENT: -te -14077574.5400 3512510.5214 -10025402.4892 6449219.7955
+      create_hillshade:
+        "z": 3
+        "igor": true
+
+# ===  PROCESSING WORKFLOW ===
+WORKFLOW:
+  Hillshade_Layer:
+    RULE:
+      NAME: "create_hillshade"
+      COMMAND: "gdaldem hillshade {INPUTS[0]} {OUTPUT} {PARAMETERS}"
+    SOURCES:
+      - "{target_name}_dem{PREVIEW}.tif"
+    OUTPUT: "{target_name}{PREVIEW}_hillshade.tif"
+    REQUIRES: [ ]
+
+  Color_Layer:
+    RULE:
+      NAME: "create_color_layer"
+      COMMAND: "gdaldem color-relief {INPUTS[0]} {INPUTS[1]} {OUTPUT} {PARAMETERS}"
+    SOURCES:
+      - "{target_name}_dem{PREVIEW}.tif"
+      - "{PROJECT_NAME}_color_ramp.txt"
+    OUTPUT: "{target_name}{PREVIEW}_color.tif"
+    REQUIRES: [ ]
+
+  Combine_Layers:
+    # Use gdal_calc.py to merge two layers
+    RULE:
+      NAME: "merge_layers"
+      DASH: "--"
+      COMMAND: >
+        gdal_calc.py 
+        -A {INPUTS[0]} 
+        -B {INPUTS[1]} 
+        --overwrite
+        --outfile={OUTPUT} 
+        --extent=intersect
+        --type=Byte
+        {PARAMETERS}
+
+    REQUIRES:
+      - "Hillshade_Layer"
+      - "Color_Layer"
+
+    INPUTS:
+      - "{REQUIRES[0]}"
+      - "{REQUIRES[1]}"
+
+    OUTPUT: "{target_name}_relief{PREVIEW}.tif"

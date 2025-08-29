@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ImportanceScore"
+version = "1.0"
+description = "ImportanceScore is an ML based tool designed to answer : How important is this item 
+relative to its peers?"
+authors = [{ name = "corb" }]
+readme = { file = "readme.md", content-type = "text/markdown" }
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "joblib>=1.5",
+    "matplotlib>=3.10",
+    "numpy>=2.2.6",
+    "pandas>=2.2.3",
+    "scikit-learn>=1.6.1",
+    "flashtext>=2.7",
+    "YMLEditor>=0.5.0",
+    "optuna>=4.5.0",
+    "shap>=0.47.2",
+]
+
+keywords = ["ML", "configuration", "editor"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Repository = "https://github.com/corb555/ImportanceScore"
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*"]
+
