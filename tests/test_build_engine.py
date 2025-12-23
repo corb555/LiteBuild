@@ -16,9 +16,9 @@ def base_config():
     return {
         "GENERAL": {
             "VAR1": "general_value"
-        }, "TARGETS": {
-            "test_target": {
-                "VAR2": "target_value"
+        }, "PROFILES": {
+            "test_profile": {
+                "VAR2": "profile_value"
             }
         }, "WORKFLOW": {
             "StepA": {
@@ -110,7 +110,7 @@ outdated_test_cases = [pytest.param(
 
 @pytest.mark.parametrize(
     "test_id, build_state, expected_code, expected_context", outdated_test_cases
-    )
+)
 def test_is_step_outdated_scenarios(
         mocker, base_config, command_map, test_id, build_state, expected_code, expected_context
 ):
@@ -179,16 +179,16 @@ def test_plan_build_full_rebuild(mocker, base_config, command_map, execution_gra
     # Mock the command generation and graph creation
     mocker.patch.object(
         BuildPlanner, "_generate_command_map_and_graph", return_value=(command_map, execution_graph)
-        )
+    )
 
     # Mock the outdated check to always return MISSING_OUTPUT for simplicity
     mocker.patch.object(
         BuildPlanner, "_is_step_outdated",
         return_value=(UpdateCode.MISSING_OUTPUT, "mock_output.txt")
-        )
+    )
 
     planner = BuildPlanner(base_config, build_state={})
-    plan = planner.plan_build(target_name="test_target")
+    plan = planner.plan_build(profile_name="test_profile")
 
     assert len(plan.steps_to_run) == 2
     assert len(plan.steps_to_skip) == 0
@@ -203,7 +203,7 @@ def test_plan_build_partial_rebuild(mocker, base_config, command_map, execution_
     """
     mocker.patch.object(
         BuildPlanner, "_generate_command_map_and_graph", return_value=(command_map, execution_graph)
-        )
+    )
 
     # Mock the outdated check: StepA is outdated, StepB is not (yet).
     def mock_is_outdated(command):
@@ -214,7 +214,7 @@ def test_plan_build_partial_rebuild(mocker, base_config, command_map, execution_
     mocker.patch.object(BuildPlanner, "_is_step_outdated", side_effect=mock_is_outdated)
 
     planner = BuildPlanner(base_config, build_state={"mock": "state"})
-    plan = planner.plan_build(target_name="test_target")
+    plan = planner.plan_build(profile_name="test_profile")
 
     # StepA is outdated, and StepB must be rebuilt because its dependency changed.
     assert len(plan.steps_to_run) == 2
@@ -234,15 +234,15 @@ def test_plan_build_no_rebuild(mocker, base_config, command_map, execution_graph
     """
     mocker.patch.object(
         BuildPlanner, "_generate_command_map_and_graph", return_value=(command_map, execution_graph)
-        )
+    )
 
     # Mock the outdated check to always return UP_TO_DATE
     mocker.patch.object(
         BuildPlanner, "_is_step_outdated", return_value=(UpdateCode.UP_TO_DATE, "")
-        )
+    )
 
     planner = BuildPlanner(base_config, build_state={"mock": "state"})
-    plan = planner.plan_build(target_name="test_target")
+    plan = planner.plan_build(profile_name="test_profile")
 
     assert len(plan.steps_to_run) == 0
     assert len(plan.steps_to_skip) == 2

@@ -59,7 +59,14 @@ parameter_set_schema = {
 templated_rule_schema = {
     'NAME': {'type': 'string', 'required': True, 'check_with': 'snakecase'},
     'DASH': {'type': 'string', 'default': '-'}, 'COMMAND': {'type': 'string', 'required': True},
-    'UNQUOTED_PARAMS': {'type': 'list', 'schema': {'type': 'string'}, 'default': []}
+    'UNQUOTED_PARAMS': {'type': 'list', 'schema': {'type': 'string'}, 'default': []},
+    'UNQUOTED_POSITIONALS': {'type': 'boolean', 'default': False},
+
+    # --- ADDING NEW DIRECTIVES FOR THE SAFE INPUT SYSTEM ---
+    'INPUT_STYLE': {
+        'type': 'string', 'allowed': ['positional', 'switch'], 'default': 'positional'
+    }, 'INPUT_SWITCH_NAME': {'type': 'string'},  # e.g., --file, -i
+    'INPUT_QUOTED': {'type': 'boolean', 'default': True}
 }
 
 workflow_step_schema = {
@@ -67,14 +74,19 @@ workflow_step_schema = {
     'OUTPUT': {'type': 'string', 'required': True}, 'ENABLED': {'type': 'boolean', 'default': True},
     'REQUIRES': {
         'type': 'list', 'schema': {'type': 'string', 'check_with': 'pascalcase'}, 'default': []
-    }, 'INPUTS': {'type': 'list', 'schema': {'type': 'string'}, 'default': []},
-    'POSITIONAL_FILENAMES': {'type': 'list', 'schema': {'type': 'string'}, 'default': []},
-    'PARAMETERS': {**parameter_set_schema, 'default': {}}
+    }, 'INPUTS': {
+        'type': ['list', 'string'], 'schema': {'type': 'string'}, 'default': []
+    }, 'POSITIONAL_FILENAMES': {
+        'type': ['list', 'string'], 'schema': {'type': 'string'}, 'default': []
+    }, 'PARAMETERS': {**parameter_set_schema, 'default': {}}
 }
 
 BUILD_SCHEMA = {
-    'config_type': {'type': 'string','required': True,'allowed': ["LiteBuildConfig"] },
-    'GENERAL': {
+    'config_type': {'type': 'string', 'required': True, 'allowed': ["LiteBuild"]},
+    'DEFAULT_WORKFLOW_STEP': {
+        'type': 'string', 'required': False,  # This is an optional key
+        'check_with': 'pascalcase'  # Enforce naming consistency with WORKFLOW keys
+    }, 'GENERAL': {
         'type': 'dict', 'schema': {
             'PREVIEW': {'type': 'string', 'default': ""}, 'PROJECT_NAME': {'type': 'string'},
             # Apply the  smart validator to the whole PARAMETERS block
@@ -83,16 +95,24 @@ BUILD_SCHEMA = {
                 'check_with': 'param_rule_names', 'default': {}
             }
         }, 'allow_unknown': True, 'default': {}
-    }, 'TARGETS': {
+    }, 'PROFILES': {
         'type': 'dict', 'valuesrules': {
             'type': 'dict', 'schema': {
-                'TARGET_FILES': {'type': 'list', 'schema': {'type': 'string'}, 'required': False},
+                'INPUT_DIRECTORY': {'type': 'string', 'required': False},
+                'INPUT_FILES': {'type': 'list', 'schema': {'type': 'string'}, 'required': False},
                 # Also apply the new validator here
                 'PARAMETERS': {
                     'type': 'dict', 'valuesrules': parameter_set_schema,
                     'check_with': 'param_rule_names', 'default': {}
                 }
             }, 'allow_unknown': True
+        }, 'default': {}
+    }, # --- NEW: Added validation for PROFILE_GROUPS ---
+    'PROFILE_GROUPS': {
+        'type': 'dict', 'required': False,  # A group is optional
+        'valuesrules': {
+            # Each value under PROFILE_GROUPS must be a list of strings
+            'type': 'list', 'schema': {'type': 'string', 'empty': False}
         }, 'default': {}
     }, 'WORKFLOW': {
         'type': 'dict', 'required': True,

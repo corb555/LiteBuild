@@ -1,0 +1,167 @@
+# =============================================================================
+# LiteBuild configuration for the  Feature Importance ranking pipeline.
+# This will extract specified features from an OpenStreetMap OSM file
+# Assign each an Importance Score and  rank all the items
+# It will then update the GIS database with the ranking of each item
+# =============================================================================
+
+config_type: "LiteBuild"
+DEFAULT_WORKFLOW_STEP: UpdateColumn
+
+# === Global variables and default parameters ===
+GENERAL:
+  SHAP_FLAG: "--explain"
+  LOG_LEVEL: "--log-level 5"
+
+  # --- Directories ---
+  RAW_DIR: "build/{SEGMENT}/raw"
+  INTERIM_DIR: "build/{SEGMENT}/interim" 
+  OUTPUT_DIR: "data/output"
+  EXTERNAL_DIR: "data/external"
+  MODELS_DIR: "models"
+  CONFIG_DIR: "config"
+  CARTO_DIR: "../openstreetmap-recreational"
+  SCRIPT_DIR: "~/Documents/PyCharm/OMTUpdate/OMTUpdate"
+  TARGET_KEY: "osm_id"
+
+  PARAMETERS:
+    update_column:
+      target-column: "rank"
+      target-key: "{TARGET_KEY}"
+      target-tables:
+        - "planet_osm_point"
+        - "planet_osm_line"
+        - "planet_osm_polygon"
+
+# === Define build profiles ===
+PROFILES:
+  seattle_poi:
+    SEGMENT: "seattle"
+    CATEGORY: "poi"
+    OSM_FILE: "{EXTERNAL_DIR}/{SEGMENT}.osm.pbf"
+
+  sedona_poi:
+    SEGMENT: "sedona"
+    CATEGORY: "poi"
+    OSM_FILE: "{EXTERNAL_DIR}/{SEGMENT}.osm.pbf"
+
+  salt_lake_poi:
+    SEGMENT: "salt_lake"
+    CATEGORY: "poi"
+    OSM_FILE: "{EXTERNAL_DIR}/{SEGMENT}.osm.pbf"
+
+  uswest_peaks:
+    SEGMENT: "uswest"
+    CATEGORY: "peaks"
+    OSM_FILE: "{EXTERNAL_DIR}/{SEGMENT}_{CATEGORY}.osm"
+
+  uswest_placenames:
+    SEGMENT: "uswest"
+    CATEGORY: "placenames"
+    OSM_FILE: "{EXTERNAL_DIR}/{SEGMENT}_{CATEGORY}.osm"
+
+  uswest_fault:
+    SEGMENT: "uswest"
+    CATEGORY: "fault"
+    OSM_FILE: "{EXTERNAL_DIR}/{SEGMENT}.osm.pbf"
+    TARGET_KEY: "name"
+    PARAMETERS:
+      update_column:
+        source-key: "name"       
+        target-key: "fault_name" 
+        target-column: "rank"          
+        target-tables:          
+          - "fault_segments"
+
+WORKFLOW:
+  ExtractFeatures:
+    # Use the xx_classification file definitions to extract features from an OSM file
+    REQUIRES: []
+    OUTPUT: "{INTERIM_DIR}/{SEGMENT}_{CATEGORY}_base_features.csv"
+    RULE:
+      NAME: "extract_osm"
+      COMMAND: "extract-osm --input {INPUTS[0]} --config config/{CATEGORY}_classification.yml  --substitutions {INPUTS[1]} --ignore-tags {INPUTS[2]} --output {OUTPUT} {LOG_LEVEL}"
+    INPUTS:
+      - "{OSM_FILE}"
+      - "{CONFIG_DIR}/osm_substitutions.yml"
+      - "{CONFIG_DIR}/ignore_tags.yml"
+
+  GetLatLon:
+    # Calculate lat/lon for items missing lat/lon (typically polygons). This is needed to ensure spatial separation of items
+    REQUIRES: []
+    OUTPUT: "{EXTERNAL_DIR}/{SEGMENT}_{CATEGORY}_latitude_enrich.csv"    
+    RULE:
+      NAME: "get_latlon"
+      COMMAND: "calc-latlon --osm-file {INPUTS[0]}  --build-dir build/{SEGMENT} --output {OUTPUT} --config config/{CATEGORY}_classification.yml"
+    INPUTS:
+      - "{OSM_FILE}"
+
+  GetWikipedia:
+    # Look up length of wikipedia articles which is used as one of the score components
+    REQUIRES: [ExtractFeatures]
+    OUTPUT: "{EXTERNAL_DIR}/{SEGMENT}_{CATEGORY}_wikipedia_enrich.csv"
+    RULE:
+      NAME: "get_wikipedia"
+      COMMAND: "get-wikipedia --input {INPUTS[0]} --output {OUTPUT} --cache {EXTERNAL_DIR}/{SEGMENT}_wikipedia_cache.json --project 'importance ranking' --email 'corb@aol.com'"
+    INPUTS:
+      - "{REQUIRES[0]}" 
+
+  EnrichFeatures:
+    # Merge in the enrichment data from the above steps
+    REQUIRES: [ExtractFeatures , GetLatLon, GetWikipedia]
+    OUTPUT: "{INTERIM_DIR}/{SEGMENT}_{CATEGORY}_features.csv" 
+    RULE:
+      NAME: "enrich_features"
+      COMMAND: "enrich-features --input {INPUTS[0]} --config config/{CATEGORY}_classification.yml --enrichment-dir {EXTERNAL_DIR}  --segment {SEGMENT} --output {OUTPUT} --ignore-errors"
+    INPUTS:
+      - "{REQUIRES[0]}" 
+
+  TrainModel:
+    # Train the Importance model
+    REQUIRES: [EnrichFeatures]
+    OUTPUT: "{MODELS_DIR}/{CATEGORY}_model.joblib"
+    RULE:
+      NAME: "importance_train"
+      COMMAND: "importance-train --features {INPUTS[0]} --targets {INPUTS[1]} --config {INPUTS[2]} --wlm-config {INPUTS[3]} --category {CATEGORY} --output {OUTPUT} {LOG_LEVEL}"
+    INPUTS:
+      - "{REQUIRES[0]}" 
+      - "{RAW_DIR}/{CATEGORY}_targets.csv"
+      - "{CONFIG_DIR}/{CATEGORY}_model.yml"
+      - "config/{CATEGORY}_classification.yml"
+
+  PredictScores:
+    # Use the trained model to predict scores for features
+    REQUIRES: [TrainModel, EnrichFeatures]
+    OUTPUT: "{INTERIM_DIR}/{SEGMENT}_{CATEGORY}_score.csv"
+    RULE:
+      NAME: "importance_predict"
+      COMMAND: "importance-predict --model {INPUTS[0]} --features {INPUTS[1]} --config {INPUTS[2]} --output {OUTPUT} --category {CATEGORY} {SHAP_FLAG} {LOG_LEVEL}"
+    INPUTS:
+      - "{REQUIRES[0]}" # The model.joblib
+      - "{REQUIRES[1]}" # The features.csv
+      - "{CONFIG_DIR}/{CATEGORY}_model.yml"
+      - "config/{CATEGORY}_classification.yml"
+
+  GeoTiers:
+    # Converts scores into tiers (ranks) and ensures spatial seperation
+    REQUIRES: [PredictScores]
+    OUTPUT: "{INTERIM_DIR}/{SEGMENT}_{CATEGORY}_tiers.csv"
+    RULE:
+      NAME: "geotier"
+      COMMAND: "geotier --input {INPUTS[0]} --category-config {INPUTS[1]} --separation-config {INPUTS[2]} --output {OUTPUT} {LOG_LEVEL}"
+    INPUTS:
+      - "{REQUIRES[0]}" # _score.csv
+      - "{CONFIG_DIR}/{CATEGORY}_tiers.yml" 
+      - "{CONFIG_DIR}/tier_separation.yml" 
+
+  UpdateColumn:
+    # Takes the output CSV with ranks and applies it to the specified DB Column
+    REQUIRES: [GeoTiers]
+    OUTPUT: "build/markers/{SEGMENT}_{CATEGORY}_rank.updated"
+    RULE:
+      NAME: "update_column"
+      DASH: "--"
+      COMMAND: "update-column {PARAMETERS} --input-csv {INPUTS[0]}  --db-config {INPUTS[1]} --marker-file {OUTPUT}  --ignore-errors "
+    INPUTS:
+      - "{REQUIRES[0]}" # _tiers.csv
+      - "{CONFIG_DIR}/db_config.yml"

@@ -2,26 +2,19 @@
 from concurrent.futures import ProcessPoolExecutor
 from enum import IntEnum
 import json
-import logging
 import os
 from pathlib import Path
 import subprocess
-import sys
-import traceback
-from typing import List, Dict, Tuple, NamedTuple, Optional, Callable
+import time
+from typing import List, Dict, Tuple, NamedTuple, Optional
 
 import networkx as nx
-# --- MODIFIED: Use the new generic ConfigLoader ---
-# Assuming the generic loader is available from this path in your environment.
 from YMLEditor.yaml_reader import ConfigLoader
 
+from build_logger import BuildLogger, setup_logger, get_logger
 from command_generator import CommandGenerator
 from dependency_graph import DependencyGraph
-# Import LiteBuild's specific schema and custom validator
 from schema import BUILD_SCHEMA, LiteBuildValidator
-
-# Use the standard Python logging library
-log = logging.getLogger(__name__)
 
 
 class UpdateCode(IntEnum):
@@ -34,7 +27,7 @@ class UpdateCode(IntEnum):
     PARAMS_CHANGED = 5
     NEWER_INPUT = 6
     MISSING_INPUT = 7
-    DEPENDENCY_CHANGED = 8
+    STALE_TARGET = 8
 
 
 class BuildStep(NamedTuple):
@@ -74,51 +67,52 @@ class BuildEngine:
             cls, config_filepath: str, cli_vars: Optional[Dict] = None,
             state_file: str = ".build_state.json"
     ):
-        """Creates a BuildEngine instance from a configuration file using the generic loader."""
+        """Creates a BuildEngine instance from a configuration file."""
         try:
-            # 1. Instantiate the loader with LiteBuild's specific components.
             loader = ConfigLoader(BUILD_SCHEMA, validator_class=LiteBuildValidator)
-
-            # 2. Read the file, requesting normalization to get default values.
             config_data = loader.read(
                 config_file=Path(config_filepath), normalize=True
             )
             return cls(config_data, cli_vars=cli_vars, state_file=state_file)
         except (FileNotFoundError, ValueError) as e:
-            # Re-raise the well-formatted exceptions from the generic loader.
-            log.error(e)
+            # Re-raise to be handled by the calling script (CLI or GUI)
             raise e
 
-    def execute(
-            self,
-            target_name: str,
-            final_step_name: str = None,
-            callbacks: Optional[Dict[str, Callable]] = None,
-    ):
-        """Plans and executes the build, reporting progress via callbacks."""
-        callbacks = callbacks or {}
-        on_info = callbacks.get("on_info", lambda msg: None)
+    def execute(self, final_step_name: str, profile_name: str = "", logger: BuildLogger = None):
+        """
+        Plans and executes the build for a specific workflow entry step.
 
-        on_info(f"🔵 Executing build for target: '{target_name}'")
-        if final_step_name:
-            on_info(f"--- Building only up to step: '{final_step_name}' ---")
+        Args:
+            final_step_name: The required  step of the workflow DAG to execute.
+            profile_name: An optional parameter context .
+            logger: The logger instance to use for output.
+        """
+        if logger is None:
+            logger = get_logger()
+        setup_logger(logger)
 
-        state_manager = BuildStateManager(self.state_file)
-        planner = BuildPlanner(self.config, state_manager.load_state())
-        plan = planner.plan_build(target_name, final_step_name)
+        logger.log(f"🔵 Executing build for step {final_step_name} using: '{profile_name}'")
 
-        executor = BuildExecutor(state_manager, self.config)
-        success = executor.execute_plan(plan, callbacks)
+        try:
+            state_manager = BuildStateManager(self.state_file)
+            planner = BuildPlanner(self.config, state_manager.load_state())
+            plan = planner.plan_build(profile_name, final_step_name)
+
+            executor = BuildExecutor(state_manager, self.config)
+            success = executor.execute_plan(plan, logger)
+        except Exception as e:
+            success = False
+            logger.log(f"{e}")
 
         if success:
-            on_info(f"\n✅ Build finished successfully for target: '{target_name}'.")
+            logger.log(f"\n✅ Build finished successfully.")
         else:
-            on_info(f"\n❌ Build failed for target: '{target_name}'.")
+            logger.log(f"❌ Build failed for {final_step_name} using: '{profile_name}'")
 
-    def describe(self, target_name: str) -> str:
-        """Generates a Markdown description of the workflow for a given target."""
+    def describe(self, profile_name: str) -> str:
+        """Generates a Markdown description of the workflow for a given profile."""
         reporter = BuildReporter(self.config)
-        return reporter.describe_workflow(target_name)
+        return reporter.describe_workflow(profile_name)
 
 
 class BuildPlanner:
@@ -129,72 +123,90 @@ class BuildPlanner:
     def __init__(self, config: Dict, build_state: Dict):
         self.config = config
         self.build_state = build_state
+        # --- NEW: Get the logger instance ---
+        self.logger = get_logger()
 
     def _is_step_outdated(self, command: Dict) -> Tuple[UpdateCode, str]:
         """Checks a single step to see if it needs to be rebuilt, with detailed debug logging."""
         output_path = command['output']
+        node_name = command.get('node_name', 'UnknownStep') # Assuming node_name is passed in command dict
 
+        self.logger.debug(f"\n--- Checking status of step '{node_name}' ---")
+        self.logger.debug(f"  - Output file: '{output_path}'")
+
+        # --- MODIFIED: Added detailed logging for each check ---
+
+        # 1. Check for output file existence
         if not os.path.exists(output_path):
-            log.debug(f"-> REBUILD: Output does not yet exist.")
+            self.logger.debug(f"  - RESULT: File does not exist. (MISSING_OUTPUT)")
             return UpdateCode.MISSING_OUTPUT, os.path.basename(output_path)
+        self.logger.debug(f"  - File exists: True")
 
+        # 2. Check if the output is tracked in the build state
         stored_state = self.build_state.get(output_path)
         if not stored_state:
-            log.debug(f"-> REBUILD: Output path '{output_path}' is not tracked in the build state file.")
+            self.logger.debug(f"  - RESULT: Output file is not tracked in build state. (NOT_TRACKED)")
             return UpdateCode.NOT_TRACKED, os.path.basename(output_path)
+        self.logger.debug(f"  - Tracked in build state: True")
 
-        # --- Hash comparisons ---
+        # 3. --- Hash comparisons ---
         stored_hashes = stored_state.get("hashes", {})
         current_hashes = command["hashes"]
 
         if stored_hashes.get("command") != current_hashes.get("command"):
-            log.debug("-> REBUILD: Command has changed.")
-            log.debug(f"  Stored: {stored_hashes.get('command')}")
-            log.debug(f"  Actual: {current_hashes.get('command')}")
+            self.logger.debug(f"  - RESULT: Command hash has changed. (COMMAND_CHANGED)")
             return UpdateCode.COMMAND_CHANGED, ""
+        self.logger.debug(f"  - Command hash: Match")
 
         if stored_hashes.get("inputs") != current_hashes.get("inputs"):
-            log.debug("-> REBUILD: Command Inputs changed.")
-            log.debug(f"  Stored: {stored_hashes.get('inputs')}")
-            log.debug(f"  Actual: {current_hashes.get('inputs')}")
+            self.logger.debug(f"  - RESULT: Input file list hash has changed. (INPUTS_CHANGED)")
             return UpdateCode.INPUTS_CHANGED, ""
+        self.logger.debug(f"  - Input list hash: Match")
 
         if stored_hashes.get("params") != current_hashes.get("params"):
-            log.debug("-> REBUILD: Command parameters have changed.")
-            log.debug(f"  Stored: {stored_hashes.get('params')}")
-            log.debug(f"  Actual: {current_hashes.get('params')}")
+            self.logger.debug(f"  - RESULT: Parameters hash has changed. (PARAMS_CHANGED)")
             return UpdateCode.PARAMS_CHANGED, ""
+        self.logger.debug(f"  - Parameters hash: Match")
 
-        # --- Mtime comparison ---
+        # Slight pause to ensure files from previous step are ready
+        time.sleep(0.1)
+
+        # 4. --- Mtime (modification time) comparison ---
         try:
             last_build_mtime = stored_state.get('mtime', 0)
-            log.debug(f"  Last build time recorded: {last_build_mtime}")
+            self.logger.debug(f"  - Last build mtime for output: {last_build_mtime} ({time.ctime(last_build_mtime)})")
+
             for input_file in command['input_files']:
+                self.logger.debug(f"    - Checking input: '{input_file}'")
                 if not os.path.exists(input_file):
-                    log.debug(f"-> REBUILD: Required input file '{input_file}' is missing.")
+                    self.logger.debug(f"    - RESULT: Input file does not exist. (MISSING_INPUT)")
                     raise FileNotFoundError(input_file)
 
                 input_mtime = os.path.getmtime(input_file)
-                log.debug(
-                    f"  Checking input '{os.path.basename(input_file)}' (mtime: {input_mtime})"
-                    )
+                self.logger.debug(f"      - Input mtime: {input_mtime} ({time.ctime(input_mtime)})")
+
                 if input_mtime > last_build_mtime:
-                    log.debug(
-                        f"-> REBUILD: Input file '{os.path.basename(input_file)}' is newer than "
-                        f"the last build."
-                        )
+                    self.logger.debug(f"      - RESULT: Input is newer than last build. (NEWER_INPUT)")
                     return UpdateCode.NEWER_INPUT, os.path.basename(input_file)
+
+            self.logger.debug(f"    - All inputs are older than the last build.")
+
         except FileNotFoundError as e:
             return UpdateCode.MISSING_INPUT, os.path.basename(str(e))
 
-        log.debug("-> UP-TO-DATE.")
+        # 5. --- Final Decision ---
+        self.logger.debug(f"  - RESULT: Step is up-to-date. (UP_TO_DATE)")
         return UpdateCode.UP_TO_DATE, ""
 
-    def plan_build(self, target_name: str, final_step_name: str = None) -> BuildPlan:
-        """Creates the full build plan, including steps to run and skip."""
+    def plan_build(self, profile_name: str, final_step_name: str = None) -> BuildPlan:
+        # ... (This method is unchanged, but we need to pass node_name to the command dict)
         command_map, execution_graph = self._generate_command_map_and_graph(
-            target_name, final_step_name
+            profile_name, final_step_name
         )
+
+        # --- MODIFICATION: Add node_name to command for better logging ---
+        for node, cmd in command_map.items():
+            cmd['node_name'] = node
 
         initially_outdated = {}
         build_order = list(nx.topological_sort(execution_graph))
@@ -213,34 +225,44 @@ class BuildPlanner:
             step_command = command_map[node_name]
             if node_name in all_nodes_to_run:
                 update_code, context = initially_outdated.get(
-                    node_name, (UpdateCode.DEPENDENCY_CHANGED, "")
+                    node_name, (UpdateCode.STALE_TARGET, "")
                 )
                 steps_to_run.append(BuildStep(node_name, step_command, update_code, context))
             else:
                 steps_to_skip.append(BuildStep(node_name, step_command, UpdateCode.UP_TO_DATE, ""))
         return BuildPlan(steps_to_run, steps_to_skip, command_map, execution_graph)
 
-    def _generate_command_map_and_graph(self, target_name: str, final_step_name: str = None) -> \
+    # ... (_generate_command_map_and_graph is unchanged) ...
+    def _generate_command_map_and_graph(self, profile_name: str, final_step_name: str = None) -> \
             Tuple[Dict, nx.DiGraph]:
-        """Generates all commands and the dependency graph for a given target."""
-        all_targets = self.config.get("TARGETS", {})
-        target_config = {}
-        if target_name:
-            if target_name in all_targets:
-                target_config = all_targets[target_name]
+        """Generates all commands and the dependency graph for a given profile."""
+        all_profiles = self.config.get("PROFILES", {})
+        profile_config = {}
+        if profile_name:
+            if profile_name in all_profiles:
+                profile_config = all_profiles[profile_name]
             else:
-                available = "\n - ".join(all_targets.keys())
+                available = "\n - ".join(all_profiles.keys())
                 raise ValueError(
-                    f"Target '{target_name}' not found. Available targets are:\n - {available}"
+                    f"profile '{profile_name}' not found. Available profiles are:\n - {available}"
                 )
-        else:
-            log.info("Parameterized build.")
 
         graph_manager = DependencyGraph(self.config.get("WORKFLOW", {}))
         execution_graph = graph_manager.get_execution_subgraph(final_step_name)
         general_config = self.config.get("GENERAL", {})
-        command_gen = CommandGenerator(general_config, target_config)
-        context = {"target_name": target_name, **general_config, **target_config}
+        command_gen = CommandGenerator(general_config, profile_config)
+        context = {"profile_name": profile_name, **general_config, **profile_config}
+
+        # Pre-process input files to create full paths automatically.
+        input_dir = context.get("INPUT_DIRECTORY")
+        input_basenames = context.get("INPUT_FILES")
+
+        if input_dir and input_basenames:
+            # Create the list of full paths
+            full_paths = [os.path.join(input_dir, f) for f in input_basenames]
+            # Overwrite the INPUT_FILES in the context with the full paths.
+            # This makes the fully resolved list available to all template substitutions.
+            context['INPUT_FILES'] = full_paths
 
         command_map, resolved_outputs = {}, {}
         for node_name in nx.topological_sort(execution_graph):
@@ -249,40 +271,39 @@ class BuildPlanner:
                 node_name, node_data, context, resolved_outputs
             )
         return command_map, execution_graph
-
-
 class BuildExecutor:
     """Executes a build plan, running commands in parallel where possible."""
 
-    def __init__(self, state_manager, config): # Pass in the whole config
+    def __init__(self, state_manager, config: Dict):
         self.state_manager = state_manager
         self.build_state = state_manager.load_state()
-        self.config = config # Store config to get GENERAL params
+        self.config = config
         self.update_codes = {
-            UpdateCode.UP_TO_DATE: "Up-to-date.",
-            UpdateCode.MISSING_OUTPUT: "Output file '{context}' does not yet exist.",
-            UpdateCode.NOT_TRACKED: "File '{context}' (first build).",
-            UpdateCode.COMMAND_CHANGED: "Command changed.",
-            UpdateCode.INPUTS_CHANGED: "Input file list  changed.",
-            UpdateCode.PARAMS_CHANGED: "Parameters changed.",
-            UpdateCode.NEWER_INPUT: "Input file '{context}' is newer.",
-            UpdateCode.MISSING_INPUT: "Input file '{context}' missing.",
-            UpdateCode.DEPENDENCY_CHANGED: "A dependency has changed."
+            UpdateCode.UP_TO_DATE: "(Up-to-date)", UpdateCode.MISSING_OUTPUT: "(Creating Output)",
+            UpdateCode.NOT_TRACKED: "(First build)",
+            UpdateCode.COMMAND_CHANGED: "(Command has changed)",
+            UpdateCode.INPUTS_CHANGED: "(Input file list has changed)",
+            UpdateCode.PARAMS_CHANGED: "(Parameters have changed)",
+            UpdateCode.NEWER_INPUT: "(Input '{context}' is newer)",
+            UpdateCode.MISSING_INPUT: "(Input '{context}' is missing)",
+            UpdateCode.STALE_TARGET: "(Target is stale)"
         }
 
-    def execute_plan(self, plan: BuildPlan, callbacks: Dict[str, Callable]) -> bool:
+    def execute_plan(self, plan: BuildPlan, logger: BuildLogger) -> bool:
         """Executes the build plan, managing parallel execution and state."""
-        on_info = callbacks.get("on_info", lambda msg: None)
-        on_step_output = callbacks.get("on_step_output", lambda step, msg: None)
-
         total_to_run = len(plan.steps_to_run)
         finished_count = 0
 
         for step in plan.steps_to_skip:
-            on_info(f"Skipping '{step.node_name}' (up-to-date)")
+            logger.log(f"Skipping '{step.node_name}' (up-to-date)")
 
         if not plan.steps_to_run:
             return True
+
+        # Ask the logger for the information needed to initialize workers.
+        # This is polymorphic: a FileLogger provides info, a StreamLogger does not.
+        worker_init_info = logger.get_worker_init_info()
+        initializer, initargs = (worker_init_info if worker_init_info else (None, ()))
 
         tasks_to_run_map = {s.node_name: s for s in plan.steps_to_run}
         for generation in nx.topological_generations(plan.execution_graph):
@@ -293,32 +314,29 @@ class BuildExecutor:
                     update_text = self.update_codes.get(step.update_code).format(
                         context=step.context
                     )
-                    # Pass the reason to the worker
                     tasks_this_generation.append((step.node_name, step.command, update_text))
 
             if not tasks_this_generation:
                 continue
 
-            max_workers = self.config.get("GENERAL", {}).get("MAX_WORKERS") # Get from config
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            max_workers = self.config.get("GENERAL", {}).get("MAX_WORKERS")
+            with ProcessPoolExecutor(
+                    max_workers=max_workers, initializer=initializer, initargs=initargs
+            ) as executor:
                 results = list(executor.map(self._run_single_command, tasks_this_generation))
 
             halt_build = False
-            for status, output_lines, result_data in results:
+            for status, result_data in results:
                 step_name = result_data.get('step_name', 'N/A')
-                # Use the on_step_output callback for all command output ---
-                for line in output_lines:
-                    on_step_output(step_name, line)
-
                 if status == 'EXECUTED':
                     finished_count += 1
-                    on_info(f"✅ Finished step '{step_name}' [{finished_count}/{total_to_run}]")
+                    logger.log(f"✅ Finished step '{step_name}' [{finished_count}/{total_to_run}]")
                     self.build_state[result_data['output_path']] = {
                         "hashes": result_data['hashes'], "mtime": result_data['mtime']
                     }
                 elif status == 'FAILED':
                     halt_build = True
-                    on_info(f"❌    Build failed on step '{step_name}'")
+                    logger.log(f"❌ Build failed for Step '{step_name}'")
             if halt_build:
                 self.state_manager.save_state(self.build_state)
                 return False
@@ -326,42 +344,36 @@ class BuildExecutor:
         return True
 
     @staticmethod
-    def _run_single_command(task: Tuple[str, Dict, str]) -> Tuple[str, List[str], Dict]:
-        """
-        Runs a command and captures all output.
-        Returns: (status, list_of_output_lines, result_data)
-        """
+    def _run_single_command(task: Tuple[str, Dict, str]) -> Tuple[str, Dict]:
+        """Runs a command and streams all output to the configured log ."""
+        logger = get_logger()
         step_name, command, update_text = task
         output_path = command['output']
 
-        # --- MODIFIED: Capture all output to a list ---
-        output_lines = []
-        output_lines.append(f"\n▶️  Running step '{step_name}': {update_text}")
-        output_lines.append(f"  [{step_name}]       {command['cmd_string']}")
+        logger.log(f"\n▶️  Running step '{step_name}': {update_text}")
+        logger.log(f"  [{step_name}]       {command['cmd_string']}")
 
         try:
             process = subprocess.Popen(
-                command['cmd_string'], shell=True, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace'
+                command['cmd_string'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace'
             )
-            for line in process.stdout:
-                output_lines.append(f"  [{step_name}]       {line.strip()}")
+            for line in iter(process.stdout.readline, ''):
+                logger.log(f"  [{step_name}]       {line.strip()}")
             return_code = process.wait()
             if return_code != 0:
-                raise subprocess.CalledProcessError(return_code, command['cmd_string'])
+                raise subprocess.CalledProcessError(return_code, "")
 
             new_mtime = os.path.getmtime(output_path)
             result_data = {
-                'step_name': step_name, 'output_path': output_path,
-                'hashes': command['hashes'], 'mtime': new_mtime
+                'step_name': step_name, 'output_path': output_path, 'hashes': command['hashes'],
+                'mtime': new_mtime
             }
-            return 'EXECUTED', output_lines, result_data
+            return 'EXECUTED', result_data
         except Exception as e:
-            #tb = traceback.format_exc()
-            output_lines.append(f"\n❌       Step '{step_name}' failed with an exception.")
-            #output_lines.append(tb)
+            logger.log(f"❌ Step '{step_name}' failed: {e}")
             result_data = {'step_name': step_name}
-            return 'FAILED', output_lines, result_data
+            return 'FAILED', result_data
 
 
 class BuildReporter:
@@ -387,12 +399,12 @@ class BuildReporter:
             lines.append(f"    style {node} fill:#f8d7da,stroke:#721c24")
         return "\n".join(lines)
 
-    def describe_workflow(self, target_name: str) -> str:
+    def describe_workflow(self, final_step_name: str, profile_name: str) -> str:
         """Generates a full Markdown report for the workflow."""
-        lines = [f"# Workflow Description for Target: {target_name}\n"]
+        lines = [f"# Workflow for  {final_step_name}\n"]
         lines.append(f"```mermaid\n{self.generate_mermaid_diagram()}\n```\n")
         planner = BuildPlanner(self.config, {})
-        plan = planner.plan_build(target_name)
+        plan = planner.plan_build(profile_name)
         lines.append("## Workflow Steps\n")
         if not plan.command_map:
             lines.append("No steps defined.")
@@ -435,7 +447,6 @@ class BuildStateManager:
             with open(self.state_file_path, 'r') as f:
                 return json.load(f)
         except (IOError, json.JSONDecodeError):
-            log.warning("Could not read or parse state file. Forcing a full rebuild.")
             return {}
 
     def save_state(self, state: Dict):
@@ -444,4 +455,10 @@ class BuildStateManager:
             with open(self.state_file_path, 'w') as f:
                 json.dump(state, f, indent=2)
         except IOError as e:
-            log.error(f"Could not write to state file '{self.state_file_path}': {e}")
+            raise IOError(f"Could not write to state file '{self.state_file_path}': {e}")
+
+
+# --- Worker initializer  accepts a logger object ---
+def setup_worker_logger(logger: BuildLogger):
+    """Initializes the logger for a worker process."""
+    setup_logger(logger)

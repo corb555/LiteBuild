@@ -3,10 +3,9 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ImportanceScore"
-version = "1.0"
-description = "ImportanceScore is an ML based tool designed to answer : How important is this item 
-relative to its peers?"
+name = "LiteBuild"
+version = "0.2"
+description = "Lightweight build engine"
 authors = [{ name = "corb" }]
 readme = { file = "readme.md", content-type = "text/markdown" }
 license = { file = "LICENSE" }
@@ -23,7 +22,6 @@ dependencies = [
     "shap>=0.47.2",
 ]
 
-keywords = ["ML", "configuration", "editor"]
 classifiers = [
     "Intended Audience :: Developers",
     "Topic :: Scientific/Engineering :: GIS",
@@ -35,8 +33,11 @@ classifiers = [
     "Operating System :: MacOS",
 ]
 
+[project.scripts]
+LiteBuild = "LiteBuild.lite_build_runner:main"
+
 [project.urls]
-Repository = "https://github.com/corb555/ImportanceScore"
+Repository = "https://github.com/corb555/LiteBuild"
 
 [tool.setuptools.packages.find]
 where = ["."]
