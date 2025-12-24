@@ -11,10 +11,10 @@ from typing import List, Dict, Tuple, NamedTuple, Optional
 import networkx as nx
 from YMLEditor.yaml_reader import ConfigLoader
 
-from build_logger import BuildLogger, setup_logger, get_logger
-from command_generator import CommandGenerator
-from dependency_graph import DependencyGraph
-from schema import BUILD_SCHEMA, LiteBuildValidator
+from LiteBuild.build_logger import BuildLogger, setup_logger, get_logger
+from LiteBuild.command_generator import CommandGenerator
+from LiteBuild.dependency_graph import DependencyGraph
+from LiteBuild.schema import BUILD_SCHEMA, LiteBuildValidator
 
 
 class UpdateCode(IntEnum):

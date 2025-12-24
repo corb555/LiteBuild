@@ -8,8 +8,8 @@ from typing import Optional, Dict
 
 from PySide6.QtCore import QObject, Signal
 
-from build_engine import BuildEngine
-from build_logger import BuildLogger, LogLevel
+from LiteBuild.build_engine import BuildEngine
+from LiteBuild.build_logger import BuildLogger, LogLevel
 
 
 class BuildWorker(QObject):

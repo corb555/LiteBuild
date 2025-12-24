@@ -6,9 +6,8 @@ from PySide6.QtGui import QTextCursor, QCloseEvent
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QVBoxLayout,
                                QPushButton, QMessageBox, QTextEdit, QFileDialog, QHBoxLayout)
 
-from build_workers import BuildWorker, BuildGroupWorker
-# Import the  controller and worker classes
-from lite_build_controller import LiteBuildController
+from LiteBuild.build_workers import BuildWorker, BuildGroupWorker
+from LiteBuild.lite_build_controller import LiteBuildController
 
 
 class LiteBuildApp(QMainWindow):
