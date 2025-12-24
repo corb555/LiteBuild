@@ -123,7 +123,6 @@ class BuildPlanner:
     def __init__(self, config: Dict, build_state: Dict):
         self.config = config
         self.build_state = build_state
-        # --- NEW: Get the logger instance ---
         self.logger = get_logger()
 
     def _is_step_outdated(self, command: Dict) -> Tuple[UpdateCode, str]:
@@ -133,8 +132,6 @@ class BuildPlanner:
 
         self.logger.debug(f"\n--- Checking status of step '{node_name}' ---")
         self.logger.debug(f"  - Output file: '{output_path}'")
-
-        # --- MODIFIED: Added detailed logging for each check ---
 
         # 1. Check for output file existence
         if not os.path.exists(output_path):
@@ -199,12 +196,10 @@ class BuildPlanner:
         return UpdateCode.UP_TO_DATE, ""
 
     def plan_build(self, profile_name: str, final_step_name: str = None) -> BuildPlan:
-        # ... (This method is unchanged, but we need to pass node_name to the command dict)
         command_map, execution_graph = self._generate_command_map_and_graph(
             profile_name, final_step_name
         )
 
-        # --- MODIFICATION: Add node_name to command for better logging ---
         for node, cmd in command_map.items():
             cmd['node_name'] = node
 
@@ -232,7 +227,6 @@ class BuildPlanner:
                 steps_to_skip.append(BuildStep(node_name, step_command, UpdateCode.UP_TO_DATE, ""))
         return BuildPlan(steps_to_run, steps_to_skip, command_map, execution_graph)
 
-    # ... (_generate_command_map_and_graph is unchanged) ...
     def _generate_command_map_and_graph(self, profile_name: str, final_step_name: str = None) -> \
             Tuple[Dict, nx.DiGraph]:
         """Generates all commands and the dependency graph for a given profile."""
@@ -271,6 +265,7 @@ class BuildPlanner:
                 node_name, node_data, context, resolved_outputs
             )
         return command_map, execution_graph
+
 class BuildExecutor:
     """Executes a build plan, running commands in parallel where possible."""
 
@@ -382,54 +377,103 @@ class BuildReporter:
     def __init__(self, config: Dict):
         self.config = config
 
-    def generate_mermaid_diagram(self) -> str:
+    def generate_mermaid_diagram(self, graph: nx.DiGraph) -> str:
         """Creates a Mermaid graph syntax string for the workflow."""
-        graph_manager = DependencyGraph(self.config.get("WORKFLOW", {}))
-        graph = graph_manager.get_execution_subgraph()
-        if not graph:
+        if not graph.nodes:
             return "graph TD;\n    Empty_Workflow[Workflow is empty];"
+
         lines = ["graph TD;"]
+
+        # Build node styles based on dependency type (Source vs Process)
+        for node in graph.nodes():
+            # In topological sort, sources have in-degree 0
+            if graph.in_degree(node) == 0:
+                lines.append(f"    {node}[{node}]:::source;")
+            else:
+                lines.append(f"    {node}[{node}]:::process;")
+
+        # Edges
         for u, v in graph.edges():
             lines.append(f"    {u} --> {v};")
-        sources = [n for n, d in graph.in_degree() if d == 0]
-        sinks = [n for n, d in graph.out_degree() if d == 0]
-        for node in sources:
-            lines.append(f"    style {node} fill:#d4edda,stroke:#155724")
-        for node in sinks:
-            lines.append(f"    style {node} fill:#f8d7da,stroke:#721c24")
+
+        # Styling Definitions
+        lines.append("    classDef source fill:#d4edda,stroke:#155724,color:#155724;")
+        lines.append("    classDef process fill:#e2e3e5,stroke:#383d41,color:#383d41;")
+
         return "\n".join(lines)
 
-    def describe_workflow(self, final_step_name: str, profile_name: str) -> str:
+    def describe_workflow(self, profile_name: str) -> str:
         """Generates a full Markdown report for the workflow."""
-        lines = [f"# Workflow for  {final_step_name}\n"]
-        lines.append(f"```mermaid\n{self.generate_mermaid_diagram()}\n```\n")
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        project_name = self.config.get("GENERAL", {}).get("PROJECT_NAME", "LiteBuild Project")
+
+        # 1. Generate the Plan to resolve all variables
         planner = BuildPlanner(self.config, {})
-        plan = planner.plan_build(profile_name)
-        lines.append("## Workflow Steps\n")
+        # Passing None for final_step gets the whole graph
+        plan = planner.plan_build(profile_name, None)
+
         if not plan.command_map:
-            lines.append("No steps defined.")
-            return "\n".join(lines)
-        build_order = list(nx.topological_sort(plan.execution_graph))
+            return f"# {project_name} - {profile_name}\nNo steps defined for this profile."
+
+        # Get the topologically sorted graph
+        graph = plan.execution_graph
+        build_order = list(nx.topological_sort(graph))
+        final_step = build_order[-1]
+        final_output = plan.command_map[final_step]['output']
+
+        # --- HEADER ---
+        lines = [
+            f"# {project_name} Pipeline Documentation",
+            "",
+            f"**Profile:** `{profile_name}`  ",
+            f"**Generated:** {timestamp}  ",
+            f"**Target Output:** `{final_output}`",
+            "",
+            "---",
+            ""
+        ]
+
+        # --- MERMAID DIAGRAM ---
+        lines.append("## Workflow Visualization")
+        lines.append("```mermaid")
+        lines.append(self.generate_mermaid_diagram(graph))
+        lines.append("```")
+        lines.append("")
+
+        # --- STEP DETAIL ---
+        lines.append("## Step-by-Step Guide")
+
+        workflow_def = self.config.get("WORKFLOW", {})
+
         for node_name in build_order:
-            command = plan.command_map[node_name]
-            node_data = plan.execution_graph.nodes[node_name]
-            lines.append(f"### {node_name}\n*   **Output:** `{command['output']}`")
-            if command['input_files']:
-                lines.append("*   **Inputs:**")
-                lines.extend([f"    *   `{f}`" for f in command['input_files']])
-            if node_data.get("REQUIRES"):
-                lines.append("*   **Requires:**")
-                lines.extend([f"    *   {dep}" for dep in node_data["REQUIRES"]])
-            lines.append(f"```sh\n{command['cmd_string']}\n```\n")
-        lines.append("## Full Command List\n")
-        lines.append("A complete list of commands to be run for a full, clean build, in order.\n")
-        lines.append("```sh")
-        for i, node_name in enumerate(build_order):
-            command_details = plan.command_map[node_name]
-            lines.append(f"#  {node_name}")
-            lines.append(command_details['cmd_string'])
+            cmd_data = plan.command_map[node_name]
+            step_def = workflow_def.get(node_name, {})
+
+            description = step_def.get("DESCRIPTION", f"Executes rule: `{step_def.get('RULE', {}).get('NAME')}`")
+
+            lines.append(f"### {node_name}")
+            lines.append(f"_{description}_")
             lines.append("")
-        lines.append("```\n")
+
+            # Inputs
+            if cmd_data['input_files']:
+                lines.append("**Inputs:**")
+                for f in cmd_data['input_files']:
+                    lines.append(f"* `{f}`")
+                lines.append("")
+
+            # Output
+            lines.append(f"**Output:** `{cmd_data['output']}`")
+            lines.append("")
+
+            # Command
+            lines.append("**Command:**")
+            lines.append("```bash")
+            lines.append(cmd_data['cmd_string'])
+            lines.append("```")
+            lines.append("---")
+
         return "\n".join(lines)
 
 

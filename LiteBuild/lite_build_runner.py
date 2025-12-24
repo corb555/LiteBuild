@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLine
                                QPushButton, QMessageBox, QTextEdit, QFileDialog, QHBoxLayout)
 
 from build_workers import BuildWorker, BuildGroupWorker
-# Import the new controller and worker classes
+# Import the  controller and worker classes
 from lite_build_controller import LiteBuildController
 
 

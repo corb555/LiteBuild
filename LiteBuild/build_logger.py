@@ -11,14 +11,13 @@ from filelock import FileLock
 # Global instance for each process to hold its logger.
 _logger_instance = None
 
-# --- NEW: Define log levels for filtering ---
+# --- Define log levels for filtering ---
 class LogLevel(IntEnum):
     DEBUG = 10
     INFO = 20
     WARNING = 30
     ERROR = 40
 
-# --- MODIFIED: The initializer function now accepts a log level ---
 def initialize_file_logger_for_worker(log_file_path_str: str, log_level_name: str):
     """Creates and sets up a BuildLogger instance in a new process."""
     global _logger_instance
@@ -28,9 +27,7 @@ def initialize_file_logger_for_worker(log_file_path_str: str, log_level_name: st
 
 class BuildLogger:
     """A unified logger that supports levels and writes to a file or stream."""
-
-    # --- MODIFIED: __init__ now accepts and stores a log level ---
-    def __init__(self, output: Union[str, Path, TextIO], log_level: LogLevel = LogLevel.INFO):
+    def __init__(self, output: Union[str, Path, Any], log_level: LogLevel = LogLevel.INFO):
         """
         Initializes the logger.
 
@@ -41,26 +38,35 @@ class BuildLogger:
         self.output_target = output
         self.level = log_level # Store the configured level
         self.is_file_based = isinstance(output, (str, Path))
-        self.log_file_handle: TextIO
+        self.log_file_handle: Any
         self.lock = None
 
         if self.is_file_based:
             log_file = Path(output)
-            # Use 'w' to clear the log on a new main process run, 'a' might be better depending on desired behavior
+            # Use 'a' to append
             self.log_file_handle = open(log_file, 'a', encoding='utf-8')
             self.lock = FileLock(log_file.with_suffix(".lock"))
-        elif isinstance(output, TextIO):
+
+        # --- FIX: Duck typing check instead of strict isinstance(TextIO) ---
+        elif hasattr(output, 'write') and hasattr(output, 'flush'):
             self.log_file_handle = output
             self.lock = nullcontext()
         else:
-            raise ValueError("Invalid Logger output")
+            # Fallback for None or invalid stdout in GUI apps
+            # If we really can't write, point to a dummy object to prevent crashes
+            if output is None:
+                import os
+                self.log_file_handle = open(os.devnull, 'w')
+                self.lock = nullcontext()
+            else:
+                raise ValueError(f"Invalid Logger output: {type(output)}")
 
     def log(self, message: str, level: LogLevel = LogLevel.INFO):
         """
         Writes a message to the output if its level is sufficient.
         This is the core dispatcher for all logging methods.
         """
-        # --- NEW: Filtering logic ---
+        # --- Filtering logic ---
         if level < self.level:
             return # Skip messages below the configured threshold
 
@@ -69,7 +75,7 @@ class BuildLogger:
             self.log_file_handle.write(formatted_message)
             self.log_file_handle.flush()
 
-    # --- NEW: Level-specific helper methods ---
+    # --- Level-specific helper methods ---
     def debug(self, message: str):
         """Logs a message with DEBUG level."""
         self.log(message, level=LogLevel.DEBUG)
@@ -92,7 +98,7 @@ class BuildLogger:
         Returns worker initialization info ONLY if this is a file-based logger.
         """
         if self.is_file_based:
-            # --- MODIFIED: Pass the log level name to the worker ---
+            # ---  Pass the log level name to the worker ---
             return initialize_file_logger_for_worker, (str(self.output_target), self.level.name)
         return None
 

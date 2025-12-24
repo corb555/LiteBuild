@@ -62,7 +62,7 @@ templated_rule_schema = {
     'UNQUOTED_PARAMS': {'type': 'list', 'schema': {'type': 'string'}, 'default': []},
     'UNQUOTED_POSITIONALS': {'type': 'boolean', 'default': False},
 
-    # --- ADDING NEW DIRECTIVES FOR THE SAFE INPUT SYSTEM ---
+    # --- ADDING  DIRECTIVES FOR THE SAFE INPUT SYSTEM ---
     'INPUT_STYLE': {
         'type': 'string', 'allowed': ['positional', 'switch'], 'default': 'positional'
     }, 'INPUT_SWITCH_NAME': {'type': 'string'},  # e.g., --file, -i
@@ -100,14 +100,14 @@ BUILD_SCHEMA = {
             'type': 'dict', 'schema': {
                 'INPUT_DIRECTORY': {'type': 'string', 'required': False},
                 'INPUT_FILES': {'type': 'list', 'schema': {'type': 'string'}, 'required': False},
-                # Also apply the new validator here
+                # Also apply the  validator here
                 'PARAMETERS': {
                     'type': 'dict', 'valuesrules': parameter_set_schema,
                     'check_with': 'param_rule_names', 'default': {}
                 }
             }, 'allow_unknown': True
         }, 'default': {}
-    }, # --- NEW: Added validation for PROFILE_GROUPS ---
+    }, # --- Added validation for PROFILE_GROUPS ---
     'PROFILE_GROUPS': {
         'type': 'dict', 'required': False,  # A group is optional
         'valuesrules': {

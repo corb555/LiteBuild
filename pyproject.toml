@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "LiteBuild"
-version = "0.2"
+version = "0.3.1"
 description = "Lightweight build engine"
 authors = [{ name = "corb" }]
-readme = { file = "readme.md", content-type = "text/markdown" }
+readme = { file = "docs/readme.md", content-type = "text/markdown" }
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = [

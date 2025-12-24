@@ -1,8 +1,15 @@
 # lite_build_controller.py
+import io
 import os
+from pathlib import Path
+import sys
+import tempfile
 from typing import Optional, Dict, Type
 
 from PySide6.QtCore import QObject, Signal, QThread
+
+from LiteBuild.build_engine import BuildEngine
+from LiteBuild.build_logger import setup_logger, BuildLogger # Ensure imports
 
 
 class LiteBuildController(QObject):
@@ -64,19 +71,31 @@ class LiteBuildController(QObject):
 
         self._thread.start()
 
+
     def describe_workflow(self, profile_name: str, cli_vars: Dict) -> Optional[str]:
-        """
-        Gets the workflow description. Returns markdown string or None on error.
-        File dialog logic should be in the UI, not here.
-        """
-        try:
-            # This would be your actual engine logic
-            # engine = BuildEngine.from_file(self.config_name, cli_vars=cli_vars)
-            # return engine.describe(profile_name)
-            return f"# Workflow for {profile_name}\n\n- Step 1\n- Step 2"  # Dummy
-        except Exception as e:
-            self.build_error.emit(f"Failed to describe workflow: {e}")
+        if not os.path.exists(self.config_name):
+            self.build_error.emit(f"Configuration file not found:\n{self.config_name}")
             return None
+
+        try:
+            # Use a temporary file path. BuildLogger accepts Path objects perfectly.
+            # We don't need to write to it, we just need the logger to initialize.
+            with tempfile.NamedTemporaryFile(delete=True) as tmp:
+                # We pass the path string/Path object
+                setup_logger(BuildLogger(Path(tmp.name)))
+
+                # Initialize the engine
+                engine = BuildEngine.from_file(self.config_name, cli_vars=cli_vars)
+
+                # Generate the report
+                markdown_report = engine.describe(profile_name)
+
+            return markdown_report
+
+        except MemoryError as e:
+            self.build_error.emit(f"Failed to generate description:\n{str(e)}")
+            return None
+
 
     def _on_build_complete(self):
         """Handles the successful completion of a build."""
