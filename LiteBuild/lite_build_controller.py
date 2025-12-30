@@ -71,6 +71,10 @@ class LiteBuildController(QObject):
 
         self._thread.start()
 
+    def has_profile(self, profile_name: str) -> bool:
+        """Checks if a specific profile key exists in the YAML config."""
+        engine = BuildEngine.from_file(self.config_name, cli_vars=None)
+        return engine.has_profile(profile_name=profile_name)
 
     def describe_workflow(self, profile_name: str, cli_vars: Dict) -> Optional[str]:
         if not os.path.exists(self.config_name):

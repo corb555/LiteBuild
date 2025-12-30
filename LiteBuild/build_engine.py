@@ -81,17 +81,25 @@ class BuildEngine:
     def execute(self, final_step_name: str, profile_name: str = "", logger: BuildLogger = None):
         """
         Plans and executes the build for a specific workflow entry step.
-
-        Args:
-            final_step_name: The required  step of the workflow DAG to execute.
-            profile_name: An optional parameter context .
-            logger: The logger instance to use for output.
         """
         if logger is None:
             logger = get_logger()
         setup_logger(logger)
 
-        logger.log(f"🔵 Executing build for step {final_step_name} using: '{profile_name}'")
+        # --- Extract Context info ---
+        general_cfg = self.config.get("GENERAL", {})
+        profile_cfg = self.config.get("PROFILES", {}).get(profile_name, {})
+
+        # Look in General (CLI vars usually land here) or Profile
+        segment = general_cfg.get("SEGMENT") or profile_cfg.get("SEGMENT") or "Unknown"
+        category = general_cfg.get("CATEGORY") or profile_cfg.get("CATEGORY") or "Unknown"
+
+        context_str = f"Segment: {segment}, Category: {category}"
+        if profile_name:
+            context_str += f" (Profile: {profile_name})"
+
+        logger.log(f"🔵 Executing build for step {final_step_name}")
+        logger.log(f"ℹ️   {context_str}\n")
 
         try:
             state_manager = BuildStateManager(self.state_file)
@@ -107,7 +115,11 @@ class BuildEngine:
         if success:
             logger.log(f"\n✅ Build finished successfully.")
         else:
-            logger.log(f"❌ Build failed for {final_step_name} using: '{profile_name}'")
+            logger.log(f"🔴Build failed for {final_step_name}")
+
+    def has_profile(self, profile_name: str) -> bool:
+        """Checks if a specific profile key exists in the YAML config."""
+        return profile_name in self.config.get('PROFILES', {})
 
     def describe(self, profile_name: str) -> str:
         """Generates a Markdown description of the workflow for a given profile."""
@@ -331,7 +343,7 @@ class BuildExecutor:
                     }
                 elif status == 'FAILED':
                     halt_build = True
-                    logger.log(f"❌ Build failed for Step '{step_name}'")
+                    logger.log(f"🔺 Build failed for Step '{step_name}'")
             if halt_build:
                 self.state_manager.save_state(self.build_state)
                 return False
@@ -366,7 +378,7 @@ class BuildExecutor:
             }
             return 'EXECUTED', result_data
         except Exception as e:
-            logger.log(f"❌ Step '{step_name}' failed: {e}")
+            logger.log(f"🔺 Step '{step_name}' failed: {e}")
             result_data = {'step_name': step_name}
             return 'FAILED', result_data
 
