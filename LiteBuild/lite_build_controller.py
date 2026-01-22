@@ -11,7 +11,6 @@ from PySide6.QtCore import QObject, Signal, QThread
 from LiteBuild.build_engine import BuildEngine
 from LiteBuild.build_logger import setup_logger, BuildLogger # Ensure imports
 
-
 class LiteBuildController(QObject):
     """
     A non-GUI controller to manage the LiteBuild process.
@@ -22,6 +21,11 @@ class LiteBuildController(QObject):
     build_finished = Signal()
     build_error = Signal(str)  # Pass a formatted string for the UI
     log_received = Signal(str)
+
+    # Status Signal (type, current, total, status_code)
+    # type: "profile" or "step"
+    # status_code: "started", "done", "skipped", "error"
+    status_update = Signal(str, int, int, str)
 
     def __init__(self, config_name: str, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -59,11 +63,16 @@ class LiteBuildController(QObject):
         self._worker = worker_class(config_path=self.config_name, cli_vars=cli_vars, **kwargs)
         self._worker.moveToThread(self._thread)
 
+        # Connect standard logging and control signals
         self._worker.log_message.connect(self.log_received)
         self._worker.finished.connect(self._on_build_complete)
         self._worker.error.connect(self._on_build_error)
 
-        # Clean up thread and worker (unchanged)
+        # Connect the status update signal from the worker to the controller
+        # This allows the worker thread to safely update the GUI status line
+        self._worker.status_signal.connect(self.status_update)
+
+        # Clean up thread and worker
         self._thread.started.connect(self._worker.run)
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)

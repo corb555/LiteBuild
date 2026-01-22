@@ -8,38 +8,40 @@ LiteBuild uses a config file to:
 
 ## Core Concepts
 
-* **Profile**: (OPTIONAL) A `profile` is a specific *version* of the final product you want to build. For example, you
-  might have a `USWest` profile that uses one set of input files and a `WA` profile that uses another. This allows you
+* **Profile**: (OPTIONAL) A `profile` is a specific set of parameters for the final product you want to build. For example, you
+  might have a `USWest` profile that uses one set of input files and a `Utah` profile that uses another. This allows you
   to manage multiple build variations from a single configuration.
 * **Workflow Step**: A `Workflow Step` is the main unit of work. It is a single, atomic *action* in your build process.
-  Each step produces one output file and can depend on other steps. Examples include "CreateDEM," "GenerateHillshade,"
+  Each step produces one output file and can require other steps. Examples include "CreateDEM," "GenerateHillshade,"
   or "CombineLayers."
 * **Rule**: A `Rule` is the part of a `Workflow Step` that defines the actual command to be run. It contains the
   `COMMAND` template and directives for how input files should be formatted.
 
 ## Config File
 
-Create a YAML configuration file that defines your build workflow.
-
 > ⚠️**Config file names** must begin with the prefix `LB_` (e.g., `LB_classify.yml`).
+> The file must include `config_type: "LiteBuild"`
 
 ## Configuration Sections
 
 The config file is organized into three top-level sections: `GENERAL`, `PROFILES`, and `WORKFLOW`.
 
-### 1. The `GENERAL` Section
+###  `GENERAL` Section
 
-This section is for defining global template parameters that apply to your entire project.
+This section defines global variables available to the entire project.
 
-#### Configure `GENERAL`:
+#### Required Keys:
 
-You can define any key-value pairs you want, which can then be used as template parameters (e.g., `{BUILD_DIR}`)
-throughout the rest of the file.
+> * `PROJECT_NAME`: A short identifier for the project (e.g., "WesternUS").
+> * `INPUT_DIRECTORY`: **(Special Key)** The base path for your source data.
+>    * *Behavior:* LiteBuild automatically joins this path with every filename listed in a profile's `INPUT_FILES` list.
+>    * *Note:* If your files are absolute paths, you can set this to `""` (empty string).
 
-* `INPUT_DIRECTORY`: **(Special Key)** A global default path that will be prepended to all filenames listed in a
-  profile's `INPUT_FILES`.
-* `PARAMETERS`: A sub-section used to set the *lowest-precedence* parameters for a specific rule.
+#### Optional Keys:
 
+You can define any custom key-value pairs here (e.g., `BUILD_DIR`, `PREVIEW_MODE`), which become available as template variables (e.g., `{BUILD_DIR}`) throughout the rest of the configuration.
+
+* `PARAMETERS`: A sub-section used to define default CLI flags for specific rules. These have the *lowest precedence* and are overridden by Profile or Step parameters.
 LiteBuild can be started from the command line with switches to define `GENERAL` parameters. These override any matching
 parameters in the config file.
 
@@ -64,10 +66,10 @@ GENERAL:
 
 ---
 
-### 2. The `PROFILES` Section
+###  `PROFILES` Section
 
 This optional section allows you to define different build variations. Each profile can specify its own unique set of
-input files and override default parameters.
+input files and override default parameters.  
 
 #### Configure `PROFILES`:
 
@@ -105,8 +107,18 @@ PROFILES:
 ```
 
 ---
+### `PROFILE GROUPS` Section
 
-### 3. The `WORKFLOW` Section
+You can also provide  `PROFILE_GROUPS`.  This allows you to run all the
+profiles in the group with a single command.
+```yaml
+PROFILE_GROUPS:
+  "ALL": 
+     - "USWest"
+     - "CanadaRockies"
+```
+
+###  `WORKFLOW` Section
 
 This section defines the sequence of all possible `Workflow Steps`. LiteBuild uses this to construct the dependency
 graph and run steps in the proper sequence.

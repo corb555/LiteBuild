@@ -37,7 +37,14 @@ class DependencyGraph:
             return self._graph  # Full build
 
         if not self._graph.has_node(final_step_name):
-            raise ValueError(f"❌Final step '{final_step_name}' not found in WORKFLOW.")
+            # Sort available steps for readability
+            available = sorted(list(self._graph.nodes))
+            available_str = "\n - ".join(available)
+
+            raise ValueError(
+                f"❌ Final step '{final_step_name}' not found in WORKFLOW.\n\n"
+                f"Available Steps:\n - {available_str}"
+            )
 
         ancestors = nx.ancestors(self._graph, final_step_name)
         nodes_to_run = ancestors.union({final_step_name})

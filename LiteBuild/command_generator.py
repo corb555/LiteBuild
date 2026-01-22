@@ -1,5 +1,3 @@
-# command_generator.py
-
 import hashlib
 import json
 import re
@@ -12,7 +10,6 @@ class CommandGenerator:
 
     class SafeFormatter(dict):
         """A dict subclass that returns the key itself if the key is missing."""
-
         def __missing__(self, key):
             return f"{{{key}}}"
 
@@ -23,6 +20,7 @@ class CommandGenerator:
     def generate_for_node(
             self, node_name: str, node_data: dict, context: dict, resolved_outputs: dict
     ) -> dict:
+        # ... (Validation logic remains the same) ...
         # Define the late-bound placeholders for validation.
         late_bound_placeholders = ["{OUTPUT}", "{INPUTS}", "{PARAMETERS}", "{POSITIONAL_FILENAMES}"]
         step_params = node_data.get("PARAMETERS", {})
@@ -48,43 +46,23 @@ class CommandGenerator:
         command_template = node_data["RULE"]["COMMAND"]
         rule_name = node_data['RULE']['NAME']
 
-        # 1. Validate that the {OUTPUT} or placeholder is always present.
         if "{OUTPUT}" not in command_template:
             error_msg = (f"❌ Configuration Error in WORKFLOW Step '{node_name}':\n"
                          f"   The COMMAND template for rule '{rule_name}' is missing the required "
-                         f"{{OUTPUT}} placeholder.\n\n"
-                         f"💡 To fix this, add {{OUTPUT}} to the command to specify where the "
-                         f"output file should be written.")
+                         f"{{OUTPUT}} placeholder.")
             raise ValueError(error_msg)
 
-        # 2. Validate that an input placeholder is used
         has_inputs_placeholder = (
                 "{INPUTS}" in command_template or re.search(r'{INPUTS\[\d+\]}', command_template))
 
         if not has_inputs_placeholder and "{POSITIONAL_FILENAMES}" not in command_template:
-            error_msg = (f"❌ Configuration Warning in WORKFLOW Step '{node_name}':\n"
-                         f"  No inputs "
-                         f"placeholder like INPUTS, INPUTS[0], or POSITIONAL_FILENAMES was found "
-                         f"in the COMMAND template for rule '{rule_name}'.\n\n"
-                         f"   To fix this, add an INPUTS  to the COMMAND.")
-            print(error_msg)
+            print(f"⚠️  Configuration Warning in WORKFLOW Step '{node_name}': No inputs placeholder found.")
 
         if final_params and "{PARAMETERS}" not in command_template:
-            error_msg = (f"❌ Configuration Error in WORKFLOW Step '{node_name}':\n"
-                         f"   Parameters were defined for the rule '{rule_name}', but the COMMAND "
-                         f"template is missing the '{{PARAMETERS}}' placeholder.\n\n"
-                         f"💡 The following parameters would be ignored: "
-                         f"{list(final_params.keys())}\n\n"
-                         f"   To fix this, add {{PARAMETERS}} to the COMMAND for this rule.")
-            raise ValueError(error_msg)
+            raise ValueError(f"❌ Configuration Error in WORKFLOW Step '{node_name}': Parameters defined but {{PARAMETERS}} missing.")
 
         if positional_filenames_templates and "{POSITIONAL_FILENAMES}" not in command_template:
-            error_msg = (f"❌ Configuration Error in WORKFLOW Step '{node_name}':\n"
-                         f"   'POSITIONAL_FILENAMES' were defined, but the COMMAND template "
-                         f"is missing the '{{POSITIONAL_FILENAMES}}' placeholder.\n\n"
-                         f"💡 To fix this, add {{POSITIONAL_FILENAMES}} to the COMMAND for this "
-                         f"rule.")
-            raise ValueError(error_msg)
+            raise ValueError(f"❌ Configuration Error in WORKFLOW Step '{node_name}': Positional filenames defined but placeholder missing.")
 
         resolved_output_file = self._deep_template(node_name, node_data["OUTPUT"], context)
         resolved_outputs[node_name] = resolved_output_file
@@ -121,10 +99,8 @@ class CommandGenerator:
         profile_params = self.profile_config.get("PARAMETERS", {}).get(rule_name, {})
         workflow_params = node_data.get("PARAMETERS", {})
 
-        merged = {**general_params, **workflow_params, **profile_params, }
+        merged = {**general_params, **profile_params, **workflow_params}
         return self._deep_template(node_name, merged, context)
-
-        # --- THIS METHOD IS MODIFIED TO HANDLE ALL CASES CORRECTLY ---
 
     def _resolve_all_inputs(
             self, node_name: str, node_data: dict, context: dict, resolved_outputs: dict,
@@ -133,30 +109,24 @@ class CommandGenerator:
         all_inputs = []
         input_templates = node_data.get("INPUTS", [])
         if isinstance(input_templates, str):
-            input_templates = [input_templates]  # Normalize to a list
+            input_templates = [input_templates]
 
         requires_list = node_data.get("REQUIRES", [])
 
         for tmpl in input_templates:
-            # Case 1: Handle {REQUIRES[n]} syntax using regex (restored logic)
             match = re.fullmatch(r"{REQUIRES\[(\d+)\]}", tmpl)
             if match:
                 dep_index = int(match.group(1))
                 if dep_index >= len(requires_list):
-                    raise ValueError(
-                        f"Error in '{node_name}': REQUIRES index [{dep_index}] is out of range."
-                    )
+                    raise ValueError(f"Error in '{node_name}': REQUIRES index [{dep_index}] is out of range.")
                 dep_name = requires_list[dep_index]
                 all_inputs.append(resolved_outputs[dep_name])
                 continue
 
-            # Case 2: Handle direct list substitution like {INPUT_FILES}
             if tmpl == "{INPUT_FILES}":
-                # Use extend to flatten the list of files into the inputs
                 all_inputs.extend(context.get("INPUT_FILES", []))
                 continue
 
-            # Case 3: Fallback for all other templates
             resolved_item = self._deep_template(node_name, tmpl, context)
             if isinstance(resolved_item, list):
                 all_inputs.extend(resolved_item)
@@ -169,28 +139,23 @@ class CommandGenerator:
             self, node_name: str, rule_data: dict, inputs: List[str], output: str, params: dict,
             positional_filenames: List[str], context: dict
     ) -> str:
-        # NOTE: This combines the hybrid logic from a few steps ago with the restored regex logic.
         template = rule_data["COMMAND"]
 
-        # --- HYBRID LOGIC FOR INPUT FORMATTING ---
         if "{INPUTS}" in template and not re.search(r'{INPUTS\[\d+\]}', template):
-            # Use the new, safe formatting system
             inputs_str = self._format_inputs_string(rule_data, inputs)
             params_str = self._format_shell_params(
                 params, rule_data.get("DASH", "-"), rule_data.get("UNQUOTED_PARAMS", [])
-                )
-            positional_filenames_str = ""  # Not used in this mode
+            )
+            positional_filenames_str = ""
         else:
-            # Use the legacy, advanced system
             unquoted_positionals = rule_data.get("UNQUOTED_POSITIONALS", False)
             positional_filenames_str = " ".join(
-                [f for f in positional_filenames] if unquoted_positionals else [shlex.quote(p) for p
-                                                                                in
-                                                                                positional_filenames]
-                )
+                [f for f in positional_filenames] if unquoted_positionals else
+                [shlex.quote(p) for p in positional_filenames]
+            )
             params_str = self._format_shell_params(
                 params, rule_data.get("DASH", "-"), rule_data.get("UNQUOTED_PARAMS", [])
-                )
+            )
             inputs_str = " ".join([shlex.quote(p) for p in inputs])
 
         template_context = {
@@ -198,33 +163,55 @@ class CommandGenerator:
             'PARAMETERS': params_str, 'POSITIONAL_FILENAMES': positional_filenames_str
         }
 
-        # --- RESTORED REGEX FOR {INPUTS[n]} ---
         def resolve_input_index(match: re.Match) -> str:
             input_index = int(match.group(1))
             if input_index >= len(inputs):
-                raise ValueError(
-                    f"Error in '{node_name}': INPUTS index [{input_index}] is out of range."
-                )
+                raise ValueError(f"Error in '{node_name}': INPUTS index [{input_index}] is out of range.")
             return shlex.quote(inputs[input_index])
 
         final_template = re.sub(r'{INPUTS\[(\d+)\]}', resolve_input_index, template)
-        # --- END OF RESTORED LOGIC ---
 
-        resolved_command = final_template.format_map(
-            self.SafeFormatter(template_context)
-            ).strip().replace('  ', ' ')
+        # ---  ITERATIVE RESOLUTION ---
+        safe_ctx = self.SafeFormatter(template_context)
+        resolved_command = final_template
+
+        # Loop to handle nested variables (e.g. {BUILD_DIR} -> build{PREVIEW})
+        for i in range(5):
+            prev = resolved_command
+            try:
+                resolved_command = resolved_command.format_map(safe_ctx)
+            except ValueError as e:
+                self._raise_formatting_error(e, node_name, final_template)
+
+            if prev == resolved_command:
+                break
+
+        resolved_command = resolved_command.strip().replace('  ', ' ')
+
+        # --- VALIDATE UNRESOLVED PLACEHOLDERS ---
+        # Look for tokens that start with Uppercase chars inside braces.
+        # This catches {PAR...}, {TYPO}, {MISSING_VAR}
+        # It ignores {}, ${VAR}, and {awk_logic}
+        unresolved = re.search(r'\{[A-Z][A-Za-z0-9_:,\.&]*\}', resolved_command)
+
+        if unresolved:
+            bad_token = unresolved.group(0)
+            raise ValueError(
+                f"\n❌ Configuration Error in WORKFLOW Step '{node_name}':\n"
+                f"   The generated command contains a placeholder that was not resolved.\n"
+                f"   Unresolved Token: {bad_token}\n"
+                f"   Command Template: \"{template}\""
+            )
 
         try:
             shlex.split(resolved_command)
         except ValueError as e:
             raise ValueError(
                 f"\n❌ Configuration Error in WORKFLOW Step '{node_name}' COMMAND:\n"
-                f"   - Error: {e}\n   - Generated Command: \n{resolved_command}\n"
+                f"   - Error: {e}\n   - Generated COMMAND: \n{resolved_command}\n"
                 f"   - Template: \n{template}\n"
             )
         return resolved_command
-
-        # (Add the _format_inputs_string helper method here if it was removed)
 
     def _format_inputs_string(self, rule_data: dict, inputs: List[str]) -> str:
         style = rule_data.get('INPUT_STYLE', 'positional')
@@ -235,9 +222,7 @@ class CommandGenerator:
         if style == 'switch':
             switch = rule_data.get('INPUT_SWITCH_NAME')
             if not switch:
-                raise ValueError(
-                    "RULE must define 'INPUT_SWITCH_NAME' when using 'switch' INPUT_STYLE."
-                    )
+                raise ValueError("RULE must define 'INPUT_SWITCH_NAME' when using 'switch' INPUT_STYLE.")
             parts = []
             for f in formatted_inputs:
                 parts.extend([switch, f])
@@ -269,26 +254,35 @@ class CommandGenerator:
         if isinstance(data, str):
             safe_context = self.SafeFormatter(context)
             templated_string = data
-            for i in range(5):  # Iterate a max of 5 times to resolve nested templates
+            for i in range(5):
                 prev_string = templated_string
                 try:
-                    # try/except block for robust error handling ---
-                    templated_string = templated_string.format_map(safe_context)
+                    try:
+                        templated_string = templated_string.format_map(safe_context)
+                    except ValueError as e:
+                        self._raise_formatting_error(e, node_name, prev_string)
                 except Exception as e:
-                    # This catches errors during the safe, iterative replacement.
+                    if isinstance(e, ValueError): raise e
+                    # This catches the iterative safety check failure
                     missing_key = e.args[0]
                     raise ValueError(
-                        f"❌ Config file error in section '{node_name}':\n    {missing_key}\n"
-                        f"  - Original: \"{data}\"\n"
-                        f"  - Before Error: \"{prev_string}\""
+                        f"❌ Templating Error in '{node_name}':\n"
+                        f"   Could not resolve variable: '{missing_key}'\n"
+                        f"   Context: \"{prev_string}\""
                     )
+
+            # --- FINAL VALIDATION ---
             try:
                 return templated_string.format_map(context)
-            except Exception as e:
+            except KeyError as e:
                 missing_key = e.args[0]
+                # Improved User-Facing Error Message
                 raise ValueError(
-                    f"❌ Error in '{node_name}':  {missing_key} in string: \""
-                    f"{data}\""
+                    f"\n\n❌ Configuration Error in WORKFLOW Step -  '{node_name}':\n"
+                    f"   Parameter '{{{missing_key}}}' is not defined\n"
+                    f"   in the GENERAL or PROFILE settings.\n"
+                    f"   \n"
+                    f"   Problematic String: \"{data}\""
                 )
 
         if isinstance(data, list):
@@ -296,3 +290,49 @@ class CommandGenerator:
         if isinstance(data, dict):
             return {k: self._deep_template(node_name, v, context) for k, v in data.items()}
         return data
+
+    @staticmethod
+    def _raise_formatting_error(e: ValueError, node_name: str, original_template: str, current_state: str = None):
+        """
+        Translates internal formatting errors into helpful LiteBuild configuration messages.
+        """
+        msg = str(e)
+
+        # Base header
+        report = f"\n\n❌ Syntax Error in WORKFLOW Step '{node_name}':\n"
+
+        # 1. Handle the "Colon" error (Invalid format specifier)
+        if "Invalid format specifier" in msg:
+            report += (
+                f"   The command template contains an invalid placeholder format.\n"
+                f"   There is a colon ':' inside a curly brace (e.g., {{aaa:bbb}}).\n\n"
+            )
+
+        # 2. Handle Missing/Extra Braces
+        elif "Unmatched" in msg:
+            report += (
+                f"   The command template has unbalanced curly braces.\n"
+                f"   Reason: You have a missing closing '}}' or an extra opening '{{'.\n"
+            )
+
+        # 3. Handle Missing Keys (if SafeFormatter didn't catch it)
+        elif "KeyError" in msg:
+            report += (
+                f"   The command references a variable that does not exist.\n"
+                f"   Error Details: {msg}\n"
+            )
+
+        # 4. Fallback for other errors
+        else:
+            report += f"   LiteBuild could not process the template string.\n   Details: {msg}\n"
+
+        # Show the Context
+        report += f"\n   --- Context ---\n"
+        report += f"   Original Template (YAML): \n     \"{original_template}\"\n"
+
+        if current_state and current_state != original_template:
+            report += f"\n   Processed State (Before Crash): \n     \"{current_state}\"\n"
+
+        report += f"\n   Python Error: {msg}\n"
+
+        raise ValueError(report) from e

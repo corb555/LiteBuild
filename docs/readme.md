@@ -1,81 +1,110 @@
+
 # **`LiteBuild`**
 
 >
-> ⚠️ THIS IS BETA SOFTWARE
+> ⚠️ **THIS IS BETA SOFTWARE**
 >
-`LiteBuild` is a lightweight build system for **data processing and general-purpose shell workflows**.
+> `LiteBuild` is under active development. APIs and configuration formats may change.
 
-LiteBuild is optimized for workflows where the primary actions are
-**running templated shell commands** that transform data files,
-image manipulation, or scientific computing tasks. It provides a clean and powerful way to
-orchestrate complex data pipelines.
----
+`LiteBuild` is a lightweight, intelligent build system designed specifically for **data processing 
+pipelines and shell workflows**.
 
-## **Features**
-
-#### **1. Declarative Workflow in a Single File**
-
-The  build process is fully defined in one structured `LB_config.yml` file. This makes your workflow easy to understand,
-version control, and reproduce. LiteBuild has no implicit steps.  Everything is explicitly defined in the config file.
-
-#### **2. Powerful Parameter Management**
-
-* **Templated Commands:** Construct complex shell commands dynamically from a hierarchy of parameters.
-* **Hierarchical Configuration:** A three-tiered parameter system (`Step` > `Profile` > `General`) maximizes reusability
-  and minimizes boilerplate.
-* **Flexible Parameter Styles:** Natively supports single-dash, double-dash, quoted, and unquoted command-line
-  arguments.
-
-#### **3. Intelligent Build Engine**
-
-* **True Incremental Builds:** The engine tracks file timestamps as well as hashes of commands, inputs, and parameters,
-  ensuring that steps are re-run when anything that affects their output has changed.
-* **Automatic Parallel Execution:** LiteBuild analyzes your dependencies and runs independent branches of your workflow
-  simultaneously to minimize build times.
-* **Atomic Outputs:** Each step must produce a single, primary output file, which serves as a clean and reliable caching key
-  for its state.
-* **Automatic Workflow Documentation:** A built-in "describe" function generates a Markdown file with a Mermaid diagram
-  of your workflow, detailed information about each step, and a complete, ordered list of the shell commands for a full,
-  clean build and integrated readme file if provided.
-* **Flexible Invocation:**
-
-- GUI - LiteBuild can be run from a simple GUI
-- Command Line - LiteBuild can be launched from the command line
-- Embedded - The LiteBuild engine library can be incorporated into an app. Configuration can be managed via the
-  structured
-  YAML file or passed as a dictionary.
-
-## Configuration
-
-The config file is organized into five sections. 
-> A detailed description is in configuration.md
-
-1. **OVERVIEW:** A brief description of the workflow's purpose.
-2. **README:** The file path to a more detailed Markdown file. The contents of this file will be embedded
-   in the `describe` output.
-3. **GENERAL:**
-    * Defines global parameters (e.g., `PROJECT_NAME`, `PREVIEW`) available for templating throughout the file.
-    * Can contain a `PARAMETERS` sub-section to define default parameters for any rule (lowest precedence).
-
-4. **PROFILES:**
-    * Each key under `PROFILES` defines a specific set of parameters.
-    * Contains the data unique to that profile, such as source file lists.
-    * Can contain a `PARAMETERS` sub-section to provide profile-specific parameter overrides (medium precedence).
-
-5. **`WORKFLOW:**
-    * Defines the build workflow as a list of steps.
-    * Each step defines:
-        * `RULE`: The name of the rule.
-        * `REQUIRES`: A list of other step names this step depends on.
-        * `OUTPUT`: A single, templated output file path.
-    * Each step can optionally define:
-        * `INPUTS`: A list of input files or the outputs of dependency steps.
-        * `PARAMETERS`: A dictionary of parameters that override all other defaults (highest precedence).
-          See configuration.md for details.
+While many build tools focus on compiling source code, LiteBuild is optimized for workflows where 
+the primary actions are **running templated shell commands** to transform data files, manipulate 
+images, or execute scientific computing tasks. It provides a clean, declarative way to orchestrate 
+complex pipelines without the overhead of heavy enterprise orchestration tools.
 
 ---
 
-## **Installation:**
+## **Why Use LiteBuild?**
 
-The `LiteBuild` package and all its dependencies are directly installable from PyPI via
-`pip`.
+You might currently be managing your workflows with a series of Bash scripts, Makefiles, or manual 
+execution. `LiteBuild` bridges the gap between simple scripts and complex orchestration platforms.
+
+**Use LiteBuild if you need to:**
+*   **Stop Re-running Expensive Tasks:** If you change a parameter in the middle of a pipeline, LiteBuild knows exactly which steps need 
+to re-run and which are still valid, saving you hours of processing time.
+*   **Separate Data from Logic:** You want to run the same sequence of operations (The Workflow) on different datasets (The Profiles) without duplicating settings.
+*   **Tame Parameter Chaos:** You have complex command-line tools that require dozens of flags. LiteBuild organizes these hierarchically, keeping 
+your commands readable and reusable.
+*   **Self-Documenting Pipelines:** You need to hand off your work to others. LiteBuild auto-generates visual diagrams and documentation of exactly 
+what your pipeline does.
+
+---
+
+## **Key Features & Benefits**
+
+### **1. Declarative Workflow in a Single File**
+The entire build process is defined in one structured `LB_config.yml` file.
+*   **The Benefit:** There is no "hidden magic" or scattered logic. Your infrastructure is defined as code, making your workflow version-controllable, 
+fully reproducible, and easy for new team members to read and understand.
+
+### **2. Powerful Parameter Management**
+LiteBuild treats command-line arguments as first-class citizens.
+*   **Templated Commands:** Construct complex shell commands dynamically using a straightforward syntax.
+*   **Hierarchical Configuration:** A three-tiered system (**Step** overrides **Profile**, which overrides **General**) allows you to define defaults once 
+and override them only when necessary.
+*   **Flexible Parameter Styles:** Whether your tools use single dashes (`-v`), double dashes (`--verbose`), or positional arguments, LiteBuild handles the 
+formatting natively.
+*   **The Benefit:** Drastically reduces boilerplate in your configuration. You define the logic of *how* a tool runs once, and feed it different parameters 
+based on the context.
+
+### **3. Intelligent Build Engine**
+The engine is designed to ensure correctness and speed.
+*   **True Incremental Builds:**  LiteBuild tracks **hashes of commands, inputs, and parameters**.
+    *   If you change a command-line flag (e.g., changing a threshold from 0.5 to 0.6), LiteBuild knows the output is stale and re-runs 
+    the step, even if the input files haven't been touched.
+*   **Automatic Parallel Execution:** The engine builds a dependency graph and automatically runs independent branches of your workflow simultaneously.
+    *   Maximizes resource utilization and reduces total build time without manual threading logic.
+*   **Atomic Outputs:** Each step must produce a single, primary output file.
+    *   *Why this matters:* This enforces a clean architecture where every file on your disk can be traced back to a specific build step, preventing "zombie files" 
+    from corrupting your results.
+
+### **4. Automatic Workflow Documentation**
+LiteBuild includes a "describe" function (`build --describe`).
+*   **The Benefit:** Documentation often goes stale the moment code changes. LiteBuild generates a Markdown file containing a **Mermaid diagram** of the 
+workflow and a complete, ordered list of every shell command that *would* be executed. It serves as dynamic, always-accurate documentation for your project.
+
+### **5. Flexible Invocation**
+*   **GUI:** For users who prefer a visual interface.
+*   **Command Line:** For integration into scripts and servers.
+*   **Embedded:** Can be imported as a Python library to add build capabilities to  applications.
+
+---
+
+## **Configuration Overview**
+
+These are the key sections in the configuration.
+`configuration.md` provides a detailed description of each.
+
+1.  **WORKFLOW:**
+    This defines the the steps to run and provides a template of the command to run for the step.
+    *   **Rule:** The name of the step and the command template to run.  The parameters in the template will be filled in 
+    by LiteBuild. Example command template:
+    `gdalwarp {INPUTS[0]} {OUTPUT} {PARAMETERS} `
+    *   **Requires:** The steps that must finish before running this step.
+    *   **Output:** The target file this step creates.
+    *   **Inputs:** The files this step reads.  You can specify that the Input is an Output from a specific step without
+    putting in the actual filename.  This makes creating chains of commands straightforward.
+
+The parameters in the command template are filled in using the following sections:
+
+2. **GENERAL:**
+    This defines the "world" the build runs in.
+    *   Set global parameters (e.g., `PROJECT_ROOT`, `DEBUG_MODE`) available to every step.
+    *   Define default parameters that apply to every rule unless overridden.
+    
+3.  **PROFILES:**
+    *   A Profile is a specific "run scenario" or "dataset."
+    *   For example, you might have profiles named `Germany`, `France`, or `Test_Run`.
+    *   Profiles contain the variable data (like source file paths) that are fed into the workflow.
+
+---
+
+## **Installation**
+
+The `LiteBuild` package and all its dependencies are directly installable from PyPI via `pip`:
+
+```bash
+pip install litebuild
+```

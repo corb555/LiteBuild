@@ -1,7 +1,7 @@
 # build_logger.py
 
 from contextlib import nullcontext
-from enum import IntEnum # <-- ADDED
+from enum import IntEnum
 from pathlib import Path
 import sys
 from typing import Optional, Tuple, Callable, Any, Union, TextIO
