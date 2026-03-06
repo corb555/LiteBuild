@@ -13,6 +13,8 @@ While many build tools focus on compiling source code, LiteBuild is optimized fo
 the primary actions are **running templated shell commands** to transform data files, manipulate 
 images, or execute scientific computing tasks. It provides a clean, declarative way to orchestrate 
 complex pipelines without the overhead of heavy enterprise orchestration tools.
+The philosophy of LiteBuild is to use explicit file based configurations that leverage
+powerful Command templating.
 
 ---
 

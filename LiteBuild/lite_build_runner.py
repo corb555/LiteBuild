@@ -61,27 +61,10 @@ class LiteBuildApp(QMainWindow):
         self.step_input.setPlaceholderText("Optional target step")
 
         # "Run" buttons
-        action_button_style = """
-            QPushButton {
-                background-color: #336B52;
-                border-radius: 5px;
-                color: white;
-                padding: 5px;
-            }
-            QPushButton:hover {
-                background-color: #3E8263; /* Slightly lighter on hover */
-            }
-            QPushButton:pressed {
-                background-color: #2A5844; /* Darker when clicked */
-            }
-        """
+
         self.run_profile_button = QPushButton("▶ Run Profile")
         self.run_group_button = QPushButton("▶ Run Group")
         self.run_step_button = QPushButton("▶ Run Step")
-
-        #self.run_profile_button.setStyleSheet(action_button_style)
-        #self.run_group_button.setStyleSheet(action_button_style)
-        #self.run_step_button.setStyleSheet(action_button_style)
 
         # Add to Grid: addWidget(widget, row, col)
 
@@ -115,30 +98,21 @@ class LiteBuildApp(QMainWindow):
         main_layout.addWidget(input_group)
 
         # --- 2. Options Section ---
-        info_button_style = """
-            QPushButton {
-                background-color: #475d70; /* Slate Blue Base */
-                border-radius: 5px;
-                color: white;
-                padding: 5px;
-            }
-            QPushButton:hover {
-                background-color: #6D8FAB; /* Lighter/Airier on hover */
-            }
-            QPushButton:pressed {
-                background-color: #4A657D; /* Darker/Steely on click */
-            }
-        """
         options_layout = QHBoxLayout()
 
         self.prevent_sleep_chk = QCheckBox("Prevent System Sleep")
         self.prevent_sleep_chk.setChecked(True)
         self.prevent_sleep_chk.setToolTip("Keeps the computer awake while the build is running.")
 
+        # Force Rebuild Checkbox
+        self.force_rebuild_chk = QCheckBox("Force Rebuild")
+        self.force_rebuild_chk.setToolTip("Force a rebuild of all steps.")
+
         self.describe_button = QPushButton("Describe Workflow")
-        #self.describe_button.setStyleSheet(info_button_style)
 
         options_layout.addWidget(self.prevent_sleep_chk)
+        options_layout.addSpacing(15) # Visual separation
+        options_layout.addWidget(self.force_rebuild_chk)
         options_layout.addStretch()
         options_layout.addWidget(self.describe_button)
 
@@ -157,7 +131,6 @@ class LiteBuildApp(QMainWindow):
         main_layout.addWidget(self.status_label)
 
         # --- 4. Console Log ---
-        #main_layout.addWidget(QLabel("Build Log:"))
         main_layout.addWidget(self.console_output)
 
         container = QWidget()
@@ -178,7 +151,6 @@ class LiteBuildApp(QMainWindow):
         self.controller.log_received.connect(self.update_console)
 
         # Status Connection
-        # Note: We assume the controller will emit this signal in Phase 2
         self.controller.status_update.connect(self.update_status)
 
     def update_status(self, context_type: str, current: int, total: int, status_code: str):

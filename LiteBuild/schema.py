@@ -96,7 +96,7 @@ BUILD_SCHEMA = {
     },
     'GENERAL': {
         'type': 'dict', 'schema': {
-            'INPUT_DIRECTORY': {'type': 'string', 'required': True},
+            'INPUT_DIRECTORY': {'type': 'string', 'required': False},
             #'PREVIEW': {'type': 'string', 'default': ""},
             'PROJECT_NAME': {'type': 'string'},
             # Apply the  smart validator to the whole PARAMETERS block

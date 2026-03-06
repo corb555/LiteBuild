@@ -1,5 +1,6 @@
 from concurrent.futures import ProcessPoolExecutor
 import datetime
+import difflib
 from enum import IntEnum
 import json
 import os
@@ -29,6 +30,7 @@ class UpdateCode(IntEnum):
     NEWER_INPUT = 6
     MISSING_INPUT = 7
     STALE_TARGET = 8
+    FORCED = 9
 
 
 class BuildStep(NamedTuple):
@@ -93,7 +95,7 @@ class BuildEngine:
             # Re-raise to be handled by the calling script (CLI or GUI)
             raise e
 
-    def execute(self, final_step_name: str, profile_name: str = "", logger: BuildLogger = None, status_callback=None):
+    def execute(self, final_step_name: str, profile_name: str = "", logger: BuildLogger = None, status_callback=None, force_rebuild=False):
         """
         Plans and executes the build for a specific workflow entry step.
         """
@@ -125,14 +127,14 @@ class BuildEngine:
         try:
             state_manager = BuildStateManager(self.state_file)
             planner = BuildPlanner(self.config, state_manager.load_state())
-            plan = planner.plan_build(profile_name, final_step_name)
+            plan = planner.plan_build(profile_name, final_step_name, force_rebuild=force_rebuild)
 
             executor = BuildExecutor(state_manager, self.config)
             success = executor.execute_plan(plan, logger, status_callback=status_callback)
         except Exception as e:
             success = False
             # ---  ERROR REPORTING ---
-            logger.log(f"\n❌ CRITICAL ERROR")
+            #logger.log(f"\n❌ ERROR")
             logger.log(f"{e}")
             #logger.log("\n--- Traceback ---")
             #logger.log(traceback.format_exc())
@@ -160,7 +162,6 @@ class BuildEngine:
         reporter = BuildReporter(self.config)
         return reporter.describe_workflow(profile_name)
 
-
 class BuildPlanner:
     """
     Analyzes the workflow and build state to create an incremental build plan.
@@ -171,7 +172,12 @@ class BuildPlanner:
         self.build_state = build_state
         self.logger = get_logger()
 
-    def _is_step_outdated(self, command: Dict) -> Tuple[UpdateCode, str]:
+    def _is_step_outdated(self, command: Dict, force_rebuild: bool = False) -> Tuple[UpdateCode, str]:
+        # 1. Force Check (Short Circuit)
+        if force_rebuild:
+            self.logger.debug(f"  - RESULT: Rebuild forced by user. (COMMAND_CHANGED)")
+            return UpdateCode.FORCED, ""
+
         """Checks a single step to see if it needs to be rebuilt, with detailed debug logging."""
         output_path = command['output']
         node_name = command.get('node_name', 'UnknownStep')
@@ -241,7 +247,7 @@ class BuildPlanner:
         self.logger.debug(f"  - RESULT: Step is up-to-date. (UP_TO_DATE)")
         return UpdateCode.UP_TO_DATE, ""
 
-    def plan_build(self, profile_name: str, final_step_name: str = None) -> BuildPlan:
+    def plan_build(self, profile_name: str, final_step_name: str = None, force_rebuild: bool = False) -> BuildPlan:
         command_map, execution_graph = self._generate_command_map_and_graph(
             profile_name, final_step_name
         )
@@ -253,7 +259,7 @@ class BuildPlanner:
         build_order = list(nx.topological_sort(execution_graph))
         for node_name in build_order:
             command = command_map[node_name]
-            update_code, context = self._is_step_outdated(command)
+            update_code, context = self._is_step_outdated(command, force_rebuild=force_rebuild)
             if update_code != UpdateCode.UP_TO_DATE:
                 initially_outdated[node_name] = (update_code, context)
 
@@ -273,6 +279,14 @@ class BuildPlanner:
                 steps_to_skip.append(BuildStep(node_name, step_command, UpdateCode.UP_TO_DATE, ""))
         return BuildPlan(steps_to_run, steps_to_skip, command_map, execution_graph)
 
+    @staticmethod
+    def get_suggestion(invalid_key: str, valid_options: list[str]) -> str:
+        """Returns a 'Did you mean X?' string if a close match is found."""
+        matches = difflib.get_close_matches(invalid_key, valid_options, n=1, cutoff=0.6)
+        if matches:
+            return f"\n   Did you mean '{matches[0]}'?"
+        return ""
+
     def _generate_command_map_and_graph(self, profile_name: str, final_step_name: str = None) -> \
             Tuple[Dict, nx.DiGraph]:
         """Generates all commands and the dependency graph for a given profile."""
@@ -283,8 +297,10 @@ class BuildPlanner:
                 profile_config = all_profiles[profile_name]
             else:
                 available = "\n - ".join(all_profiles.keys())
+                hint = self.get_suggestion(profile_name, list(all_profiles.keys()))
                 raise ValueError(
-                    f"\nProfile '{profile_name}' not found. \n\nAvailable profiles:\n - {available}\n"
+                    f"\nProfile '{profile_name}' not found.{hint}\n"
+                    f"\nAvailable profiles:\n - {available}\n"
                 )
 
         graph_manager = DependencyGraph(self.config.get("WORKFLOW", {}))
@@ -332,7 +348,8 @@ class BuildExecutor:
             UpdateCode.PARAMS_CHANGED: "(parameters have changed)",
             UpdateCode.NEWER_INPUT: "(input '{context}' is newer)",
             UpdateCode.MISSING_INPUT: "(input '{context}' is missing)",
-            UpdateCode.STALE_TARGET: "(stale target)"
+            UpdateCode.STALE_TARGET: "(stale target)",
+            UpdateCode.FORCED: "(forced)"
         }
 
     def execute_plan(self, plan: BuildPlan, logger: BuildLogger, status_callback=None) -> bool:

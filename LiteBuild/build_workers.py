@@ -1,4 +1,5 @@
 # build_workers.py
+import difflib
 import os
 import threading
 import time
@@ -138,6 +139,14 @@ class BuildGroupWorker(QObject):
         """
         self.status_signal.emit(type, current, total, status)
 
+    @staticmethod
+    def get_suggestion(invalid_key: str, valid_options: list[str]) -> str:
+        """Returns a 'Did you mean X?' string if a close match is found."""
+        matches = difflib.get_close_matches(invalid_key, valid_options, n=1, cutoff=0.6)
+        if matches:
+            return f"\n   Did you mean '{matches[0]}'?"
+        return ""
+
     def run(self):
         """
         Iterates through profiles, calling BuildEngine for each one.
@@ -149,7 +158,9 @@ class BuildGroupWorker(QObject):
             profile_groups = engine.config.get("PROFILE_GROUPS", {})
             if self.group_name not in profile_groups:
                 available = list(profile_groups.keys())
-                raise ValueError(f"Profile Group '{self.group_name}' not found. Available: {available}")
+                hint = self.get_suggestion(self.group_name, available)
+
+                raise ValueError(f"Profile Group '{self.group_name}' not found. {hint}\n Available: {available}")
 
             profiles_to_run = profile_groups[self.group_name]
             total_profiles = len(profiles_to_run)
