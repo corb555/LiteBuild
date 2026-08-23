@@ -47,7 +47,6 @@ class BuildLogger:
             self.log_file_handle = open(log_file, 'a', encoding='utf-8')
             self.lock = FileLock(log_file.with_suffix(".lock"))
 
-        # --- FIX: Duck typing check instead of strict isinstance(TextIO) ---
         elif hasattr(output, 'write') and hasattr(output, 'flush'):
             self.log_file_handle = output
             self.lock = nullcontext()

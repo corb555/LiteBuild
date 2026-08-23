@@ -5,23 +5,25 @@ import shlex
 from typing import List, Any
 
 
+
+#command_generator.py
+
 class CommandGenerator:
-    """Generates commands based on configuration and build context."""
+    """DOCString remains the same"""
 
     class SafeFormatter(dict):
         """A dict subclass that returns the key itself if the key is missing."""
         def __missing__(self, key):
             return f"{{{key}}}"
 
-    def __init__(self, general_config: dict, profile_config: dict):
-        self.general_config = general_config
+    def __init__(self, parameters_config: dict, profile_config: dict):
+        self.parameters_config = parameters_config
         self.profile_config = profile_config
 
     def generate_for_node(
             self, node_name: str, node_data: dict, context: dict, resolved_outputs: dict
     ) -> dict:
         # ... (Validation logic remains the same) ...
-        # Define the late-bound placeholders for validation.
         late_bound_placeholders = ["{OUTPUT}", "{INPUTS}", "{PARAMETERS}", "{POSITIONAL_FILENAMES}"]
         step_params = node_data.get("PARAMETERS", {})
         for key, value in step_params.items():
@@ -32,7 +34,6 @@ class CommandGenerator:
                                  f"'PARAMETERS' block.")
                     raise ValueError(error_msg)
 
-        # --- Resolve all components first ---
         final_params = self._merge_parameters(node_name, node_data, context)
 
         all_resolved_inputs = self._resolve_all_inputs(
@@ -52,11 +53,19 @@ class CommandGenerator:
                          f"{{OUTPUT}} placeholder.")
             raise ValueError(error_msg)
 
+        # Validate {INPUTS} and {POSITIONAL_FILENAMES}
+        no_inputs_flag = node_data["RULE"]["NO_INPUTS"]
+
         has_inputs_placeholder = (
                 "{INPUTS}" in command_template or re.search(r'{INPUTS\[\d+\]}', command_template))
 
-        if not has_inputs_placeholder and "{POSITIONAL_FILENAMES}" not in command_template:
-            print(f"⚠️  Configuration Warning in WORKFLOW Step '{node_name}': No inputs placeholder found.")
+        has_positional_placeholder = "{POSITIONAL_FILENAMES}" in command_template
+
+        if not no_inputs_flag and not has_inputs_placeholder and not has_positional_placeholder:
+            print(
+                f"⚠️  Configuration Warning in WORKFLOW Step '{node_name}': "
+                "No {INPUTS} or {POSITIONAL_FILENAMES} in COMMAND."
+            )
 
         if final_params and "{PARAMETERS}" not in command_template:
             raise ValueError(f"❌ Configuration Error in WORKFLOW Step '{node_name}': Parameters defined but {{PARAMETERS}} missing.")
@@ -64,7 +73,7 @@ class CommandGenerator:
         if positional_filenames_templates and "{POSITIONAL_FILENAMES}" not in command_template:
             raise ValueError(f"❌ Configuration Error in WORKFLOW Step '{node_name}': Positional filenames defined but placeholder missing.")
 
-        resolved_output_file = self._deep_template(node_name, node_data["OUTPUT"], context)
+        resolved_output_file = self._resolve_nested_template(node_name, node_data["OUTPUT"], context)
         resolved_outputs[node_name] = resolved_output_file
 
         command_hash = self._get_hash(command_template)
@@ -72,7 +81,7 @@ class CommandGenerator:
         params_hash = self._get_hash(final_params)
 
         local_context = {**context, 'INPUTS': all_resolved_inputs, 'OUTPUT': resolved_output_file}
-        resolved_positional_filenames = self._deep_template(
+        resolved_positional_filenames = self._resolve_nested_template(
             node_name, positional_filenames_templates, local_context
         )
 
@@ -88,19 +97,14 @@ class CommandGenerator:
             "hashes": {"command": command_hash, "inputs": inputs_hash, "params": params_hash}
         }
 
-    @staticmethod
-    def _get_hash(data: Any) -> str:
-        canonical_string = json.dumps(data, sort_keys=True)
-        return hashlib.sha256(canonical_string.encode('utf-8')).hexdigest()
-
     def _merge_parameters(self, node_name: str, node_data: dict, context: dict) -> dict:
         rule_name = node_data["RULE"]["NAME"]
-        general_params = self.general_config.get("PARAMETERS", {}).get(rule_name, {})
+        default_params = self.parameters_config.get(rule_name, {})
         profile_params = self.profile_config.get("PARAMETERS", {}).get(rule_name, {})
         workflow_params = node_data.get("PARAMETERS", {})
 
-        merged = {**general_params, **profile_params, **workflow_params}
-        return self._deep_template(node_name, merged, context)
+        merged = {**default_params, **profile_params, **workflow_params}
+        return self._resolve_nested_template(node_name, merged, context)
 
     def _resolve_all_inputs(
             self, node_name: str, node_data: dict, context: dict, resolved_outputs: dict,
@@ -127,7 +131,7 @@ class CommandGenerator:
                 all_inputs.extend(context.get("INPUT_FILES", []))
                 continue
 
-            resolved_item = self._deep_template(node_name, tmpl, context)
+            resolved_item = self._resolve_nested_template(node_name, tmpl, context)
             if isinstance(resolved_item, list):
                 all_inputs.extend(resolved_item)
             else:
@@ -250,7 +254,7 @@ class CommandGenerator:
                 flags.extend([shlex.quote(flag), shlex.quote(str(value))])
         return " ".join(flags)
 
-    def _deep_template(self, node_name: str, data: Any, context: dict) -> Any:
+    def _resolve_nested_template(self, node_name: str, data: Any, context: dict) -> Any:
         if isinstance(data, str):
             safe_context = self.SafeFormatter(context)
             templated_string = data
@@ -286,10 +290,16 @@ class CommandGenerator:
                 )
 
         if isinstance(data, list):
-            return [self._deep_template(node_name, item, context) for item in data]
+            return [self._resolve_nested_template(node_name, item, context) for item in data]
         if isinstance(data, dict):
-            return {k: self._deep_template(node_name, v, context) for k, v in data.items()}
+            return {k: self._resolve_nested_template(node_name, v, context) for k, v in data.items()}
         return data
+
+    @staticmethod
+    def _get_hash(data: Any) -> str:
+        canonical_string = json.dumps(data, sort_keys=True)
+        return hashlib.sha256(canonical_string.encode('utf-8')).hexdigest()
+
 
     @staticmethod
     def _raise_formatting_error(e: ValueError, node_name: str, original_template: str, current_state: str = None):

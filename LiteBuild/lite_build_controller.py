@@ -1,4 +1,3 @@
-# lite_build_controller.py
 import io
 import os
 from pathlib import Path
@@ -11,10 +10,11 @@ from PySide6.QtCore import QObject, Signal, QThread
 from LiteBuild.build_engine import BuildEngine
 from LiteBuild.build_logger import setup_logger, BuildLogger # Ensure imports
 
+# lite_build_controller.py
+
 class LiteBuildController(QObject):
     """
     A non-GUI controller to manage the LiteBuild process.
-    This is the reusable core logic of the application.
     """
     # Signals for the UI to connect to
     build_started = Signal()
@@ -22,10 +22,8 @@ class LiteBuildController(QObject):
     build_error = Signal(str)  # Pass a formatted string for the UI
     log_received = Signal(str)
 
-    # Status Signal (type, current, total, status_code)
-    # type: "profile" or "step"
-    # status_code: "started", "done", "skipped", "error"
-    status_update = Signal(str, int, int, str)
+    # Status Signal carrying a StatusMessage instance.
+    status_update = Signal(object)
 
     def __init__(self, config_name: str, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -69,7 +67,7 @@ class LiteBuildController(QObject):
         self._worker.error.connect(self._on_build_error)
 
         # Connect the status update signal from the worker to the controller
-        # This allows the worker thread to safely update the GUI status line
+        # This allows the worker thread to  update the GUI status line
         self._worker.status_signal.connect(self.status_update)
 
         # Clean up thread and worker
@@ -109,7 +107,6 @@ class LiteBuildController(QObject):
             self.build_error.emit(f"Failed to generate description:\n{str(e)}")
             return None
 
-
     def _on_build_complete(self):
         """Handles the successful completion of a build."""
         self.build_finished.emit()
@@ -124,7 +121,7 @@ class LiteBuildController(QObject):
 
     def _cleanup(self):
         """
-        CORRECTED: This method now only tells the thread to stop its event loop.
+        This method  only tells the thread to stop its event loop.
         The actual deletion is handled by the `deleteLater` connections.
         """
         if self._thread and self._thread.isRunning():

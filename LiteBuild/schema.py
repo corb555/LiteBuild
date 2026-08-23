@@ -1,8 +1,17 @@
 # schema.py
-
+from enum import StrEnum
 import re
 
 from cerberus import Validator
+
+
+class YAMLSection(StrEnum):
+    """Enumeration for different sections in the YAML configuration."""
+    PROJECT = "PROJECT"
+    GENERAL = "GENERAL"
+    PARAMETERS = "PARAMETERS"
+    PROFILE_GROUPS = "PROFILE_GROUPS"
+    PROFILES = "PROFILES"
 
 
 # --- Custom Validator - ensures Case rules for names ---
@@ -59,14 +68,16 @@ parameter_set_schema = {
 # Rule Section
 templated_rule_schema = {
     'NAME': {'type': 'string', 'required': True, 'check_with': 'snakecase'},
-    'DASH': {'type': 'string', 'default': '-'}, 'COMMAND': {'type': 'string', 'required': True},
+    'DASH': {'type': 'string', 'default': '-'},
+    'COMMAND': {'type': 'string', 'required': True},
     'UNQUOTED_PARAMS': {'type': 'list', 'schema': {'type': 'string'}, 'default': []},
     'UNQUOTED_POSITIONALS': {'type': 'boolean', 'default': False},
 
     'INPUT_STYLE': {
         'type': 'string', 'allowed': ['positional', 'switch'], 'default': 'positional'
     }, 'INPUT_SWITCH_NAME': {'type': 'string'},  # e.g., --file, -i
-    'INPUT_QUOTED': {'type': 'boolean', 'default': True}
+    'INPUT_QUOTED': {'type': 'boolean', 'default': True},
+    'NO_INPUTS': {'type': 'boolean', 'default': False}
 }
 
 # Workflow Section
@@ -94,18 +105,25 @@ BUILD_SCHEMA = {
         'type': 'string', 'required': False,  # This is an optional key
         'check_with': 'pascalcase'  # Enforce naming consistency with WORKFLOW keys
     },
-    'GENERAL': {
+    'PROJECT': {
         'type': 'dict', 'schema': {
-            'INPUT_DIRECTORY': {'type': 'string', 'required': False},
-            #'PREVIEW': {'type': 'string', 'default': ""},
-            'PROJECT_NAME': {'type': 'string'},
-            # Apply the  smart validator to the whole PARAMETERS block
-            'PARAMETERS': {
-                'type': 'dict', 'valuesrules': parameter_set_schema,
-                'check_with': 'param_rule_names', 'default': {}
-            }
+            'OVERVIEW': {'type': 'string', 'required': True},
+            'DEFAULT_WORKFLOW_STEP': {'type': 'string', 'required': True}
         }, 'allow_unknown': True, 'default': {}
     },
+    'GENERAL': {
+        'type': 'dict', 'schema': {
+            'INPUT_DIRECTORY': {'type': 'string', 'required': True},
+            'PROJECT_NAME': {'type': 'string', 'required': True}
+        }, 'allow_unknown': True, 'default': {}
+    },
+    'PARAMETERS': {
+        'type': 'dict',
+        'valuesrules': parameter_set_schema,
+        'check_with': 'param_rule_names',
+        'default': {},
+    },
+
     'PROFILES': {
         'type': 'dict', 'valuesrules': {
             'type': 'dict', 'schema': {

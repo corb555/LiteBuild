@@ -1,112 +1,246 @@
 
-# **`LiteBuild`**
+# LiteBuild
 
->
-> ⚠️ **THIS IS BETA SOFTWARE**
->
-> `LiteBuild` is under active development. APIs and configuration formats may change.
 
-`LiteBuild` is a lightweight, intelligent build system designed specifically for **data processing 
-pipelines and shell workflows**.
+> THIS PROJECT IS
+**EXPERIMENTAL**. Features and Interfaces are still evolving.
 
-While many build tools focus on compiling source code, LiteBuild is optimized for workflows where 
-the primary actions are **running templated shell commands** to transform data files, manipulate 
-images, or execute scientific computing tasks. It provides a clean, declarative way to orchestrate 
-complex pipelines without the overhead of heavy enterprise orchestration tools.
-The philosophy of LiteBuild is to use explicit file based configurations that leverage
-powerful Command templating.
+`LiteBuild` is a lightweight, configuration-driven build system designed specifically for
+**data-processing pipelines and shell workflows**.  The goal is to make complex data pipelines **explicit, reproducible, 
+easy to inspect, and easy to modify**
+without requiring custom orchestration code.
 
----
+LiteBuild is optimized for workflows where the
+primary actions are **running templated shell commands** to transform data files, manipulate images, or
+execute scientific-computing tasks.
 
-## **Why Use LiteBuild?**
-
-You might currently be managing your workflows with a series of Bash scripts, Makefiles, or manual 
-execution. `LiteBuild` bridges the gap between simple scripts and complex orchestration platforms.
-
-**Use LiteBuild if you need to:**
-*   **Stop Re-running Expensive Tasks:** If you change a parameter in the middle of a pipeline, LiteBuild knows exactly which steps need 
-to re-run and which are still valid, saving you hours of processing time.
-*   **Separate Data from Logic:** You want to run the same sequence of operations (The Workflow) on different datasets (The Profiles) without duplicating settings.
-*   **Tame Parameter Chaos:** You have complex command-line tools that require dozens of flags. LiteBuild organizes these hierarchically, keeping 
-your commands readable and reusable.
-*   **Self-Documenting Pipelines:** You need to hand off your work to others. LiteBuild auto-generates visual diagrams and documentation of exactly 
-what your pipeline does.
+The complete workflow remains declarative rather than becoming a programming language. Project-specific
+build logic is kept in explicit, file-based configuration, while LiteBuild provides command templating,
+dependency tracking, incremental execution, parallel scheduling, profiles, and build-state management.
 
 ---
 
-## **Key Features & Benefits**
+## LiteBuild Key Features & Benefits
 
-### **1. Declarative Workflow in a Single File**
-The entire build process is defined in one structured `LB_config.yml` file.
-*   **The Benefit:** There is no "hidden magic" or scattered logic. Your infrastructure is defined as code, making your workflow version-controllable, 
-fully reproducible, and easy for new team members to read and understand.
+### 1. Declarative Workflow in a Single File
 
-### **2. Powerful Parameter Management**
-LiteBuild treats command-line arguments as first-class citizens.
-*   **Templated Commands:** Construct complex shell commands dynamically using a straightforward syntax.
-*   **Hierarchical Configuration:** A three-tiered system (**Step** overrides **Profile**, which overrides **General**) allows you to define defaults once 
-and override them only when necessary.
-*   **Flexible Parameter Styles:** Whether your tools use single dashes (`-v`), double dashes (`--verbose`), or positional arguments, LiteBuild handles the 
-formatting natively.
-*   **The Benefit:** Drastically reduces boilerplate in your configuration. You define the logic of *how* a tool runs once, and feed it different parameters 
-based on the context.
+The complete project-specific build workflow is defined in one structured configuration file, including
+steps, dependencies, commands, parameters, profiles, profile groups, and outputs.
 
-### **3. Intelligent Build Engine**
-The engine is designed to ensure correctness and speed.
-*   **True Incremental Builds:**  LiteBuild tracks **hashes of commands, inputs, and parameters**.
-    *   If you change a command-line flag (e.g., changing a threshold from 0.5 to 0.6), LiteBuild knows the output is stale and re-runs 
-    the step, even if the input files haven't been touched.
-*   **Automatic Parallel Execution:** The engine builds a dependency graph and automatically runs independent branches of your workflow simultaneously.
-    *   Maximizes resource utilization and reduces total build time without manual threading logic.
-*   **Atomic Outputs:** Each step must produce a single, primary output file.
-    *   *Why this matters:* This enforces a clean architecture where every file on your disk can be traced back to a specific build step, preventing "zombie files" 
-    from corrupting your results.
+* **The Benefit:** Workflow logic is centralized rather than scattered across shell scripts and application
+  code. The build definition is version-controllable, reproducible, and easier to inspect, modify, and
+  understand.
 
-### **4. Automatic Workflow Documentation**
-LiteBuild includes a "describe" function (`build --describe`).
-*   **The Benefit:** Documentation often goes stale the moment code changes. LiteBuild generates a Markdown file containing a **Mermaid diagram** of the 
-workflow and a complete, ordered list of every shell command that *would* be executed. It serves as dynamic, always-accurate documentation for your project.
+### 2. Powerful Parameter Management
 
-### **5. Flexible Invocation**
-*   **GUI:** For users who prefer a visual interface.
-*   **Command Line:** For integration into scripts and servers.
-*   **Embedded:** Can be imported as a Python library to add build capabilities to  applications.
+LiteBuild treats command parameters as part of the build definition.
+
+* **Templated Commands:** Complex external commands can be constructed dynamically from reusable
+  configuration.
+* **Hierarchical Configuration:** A three-tier system—**Step overrides Profile, which overrides General**—
+  allows common defaults to be defined once and changed only where necessary.
+* **Flexible Parameter Styles:** Positional arguments, single-dash options, double-dash options, unquoted
+  parameters, and other command conventions can be represented directly.
+* **The Benefit:** A tool's invocation logic can be defined once and reused across profiles and workflow
+  steps without duplicating command definitions.
+
+### 3.  Dependency-Based Build Engine
+
+Like most modern build systems, LiteBuild determines what actually needs to run rather than simply executing every 
+configured step and executes steps in parallel when possible.
+
+* **Parameter-Aware Incremental Builds:** LiteBuild tracks resolved commands, inputs, parameters, outputs,
+  and file modification times. Changing an input, command, or processing parameter invalidates the affected
+  output and its downstream dependents, while unrelated branches remain untouched.
+
+* **Dependency Checking:** Each step is evaluated against its dependencies and current state.
+  Up-to-date branches are skipped automatically.
+
+* **Automatic Parallel Execution:** Independent branches of the dependency graph  run concurrently.
+
+* **Single Primary Output per Step:** Each step identifies _one primary output_ used for dependency tracking
+  and incremental build state. This gives every step a clear result and makes the workflow easier to
+  understand and troubleshoot.
+
+* **Step Name Chaining:** Steps depend on other **step names**, rather than 
+  upstream output filenames. Generic references such as `{REQUIRES[0]}` and `{INPUTS[0]}` resolve upstream
+  filenames automatically.
+
+  For example:
+
+  ```yaml
+  WarpDEM:
+    REQUIRES:
+      - DEMVRT
+    OUTPUT: "{DEM_SOURCE}"
+    RULE:
+      NAME: create_dem
+      COMMAND: gdalwarp {INPUTS[0]} {OUTPUT} {PARAMETERS}
+    INPUTS:
+      - "{REQUIRES[0]}"
+  ```
+
+`WarpDEM` does not need to know the  filename produced by `DEMVRT`. Removing, replacing, or
+inserting an intermediate step often only requires changing  the `REQUIRES` relationship; downstream
+commands, file paths, and parameter definitions  remain unchanged.
+
+### 4. Profiles and Profile Groups
+
+LiteBuild can run the same workflow against multiple named parameter sets.
+
+* **Profiles:** Define build-specific inputs and parameter overrides while sharing the same workflow
+  definition.
+* **Profile Groups:** Collections of **Profiles** that can be executed sequentially as a larger
+  build.
+* **The Benefit:** A single workflow can support one-off builds, multiple variants, regional datasets, or
+  complete production build sets without duplicating the dependency graph or command definitions.
+
+### 5. Automatic Workflow Documentation
+
+LiteBuild can generate a description of the configured workflow directly from the build definition.
+
+* It produces Markdown containing a Mermaid dependency diagram and the ordered commands represented by the
+  configuration.
+* **The Benefit:** Documentation is generated from the same configuration that drives execution, reducing
+  the chance that workflow documentation drifts away from the actual build.
+
+### 6. Flexible Invocation
+
+The same LiteBuild workflow can be used in several environments:
+
+* **GUI** — for interactive use.
+* **Command Line** — for scripting, automation, and servers.
+* **Python API** — the build engine can be invoked directly by another Python application.
+* **Subprocess Integration** — applications can invoke the LiteBuild CLI as an isolated external build
+  process.
+
+**The Benefit:** The workflow definition remains the same regardless of how the build is initiated.
 
 ---
 
-## **Configuration Overview**
+## Configuration Overview
 
-These are the key sections in the configuration.
-`configuration.md` provides a detailed description of each.
+These are the key sections in the configuration. `configuration.md` provides a detailed description of
+each.
 
-1.  **WORKFLOW:**
-    This defines the the steps to run and provides a template of the command to run for the step.
-    *   **Rule:** The name of the step and the command template to run.  The parameters in the template will be filled in 
-    by LiteBuild. Example command template:
-    `gdalwarp {INPUTS[0]} {OUTPUT} {PARAMETERS} `
-    *   **Requires:** The steps that must finish before running this step.
-    *   **Output:** The target file this step creates.
-    *   **Inputs:** The files this step reads.  You can specify that the Input is an Output from a specific step without
-    putting in the actual filename.  This makes creating chains of commands straightforward.
+### 1. WORKFLOW
 
-The parameters in the command template are filled in using the following sections:
+`WORKFLOW` defines the steps in the build and their dependency relationships.
 
-2. **GENERAL:**
-    This defines the "world" the build runs in.
-    *   Set global parameters (e.g., `PROJECT_ROOT`, `DEBUG_MODE`) available to every step.
-    *   Define default parameters that apply to every rule unless overridden.
-    
-3.  **PROFILES:**
-    *   A Profile is a specific "run scenario" or "dataset."
-    *   For example, you might have profiles named `Germany`, `France`, or `Test_Run`.
-    *   Profiles contain the variable data (like source file paths) that are fed into the workflow.
+Each step can define:
 
----
+* **REQUIRES:** Names the upstream steps that must complete before this step can run.
+* **OUTPUT:** Identifies the primary file created by the step.
+* **INPUTS:** Identifies the files consumed by the step. Inputs may reference the outputs of required steps
+  without hard-coding their filenames.
+* **RULE:** Defines the command template used to execute the step.
 
-## **Installation**
+For example:
 
-The `LiteBuild` package and all its dependencies are directly installable from PyPI via `pip`:
-
-```bash
-pip install litebuild
+```text
+gdalwarp {INPUTS[0]} {OUTPUT} {PARAMETERS}
 ```
+
+LiteBuild resolves the input, output, and parameters when the step runs.
+
+This allows workflow steps to be chained by logical dependency rather than by embedding physical filenames
+throughout the configuration.
+
+### 2. GENERAL
+
+`GENERAL` defines the shared environment for the build.
+
+It can:
+
+* define global values such as project paths and common settings;
+* provide parameters available to all steps; and
+* define defaults that apply unless overridden by a Profile or individual Step.
+
+### 3. PROFILES
+
+A Profile represents a particular build scenario or dataset.
+
+For example, a workflow might define profiles such as:
+
+```text
+Germany
+France
+Test_Run
+```
+
+Each Profile supplies the variable inputs and parameter overrides needed to run the shared workflow for that
+case.
+
+The workflow itself remains unchanged.
+
+---
+
+## LiteBuild and Other Build Systems
+
+LiteBuild intentionally focuses on a narrower problem than many general-purpose build and workflow systems.
+
+Its goal is not to provide every possible form of dynamic workflow construction. Instead, it emphasizes
+**explicit named steps, templated external commands, file dependencies, profiles, and predictable
+incremental builds**.
+
+### LiteBuild
+
+LiteBuild is designed for **readable, file-oriented data-processing pipelines** built around external
+commands.
+
+Its strengths include:
+
+* declarative workflow configuration;
+* command and parameter templating;
+* parameter-aware incremental rebuilds;
+* explicit dependency relationships;
+* logical step chaining;
+* profiles and profile groups;
+* automatic dependency-based parallel execution;
+* one primary output per step; and
+* easy-to-inspect workflow structure.
+
+LiteBuild is a good fit when the goal is to keep a complex data pipeline **explicit, reproducible, and easy
+to modify without turning the workflow definition into a programming language**.
+
+### CMake
+
+CMake is primarily designed to configure and generate portable builds for compiled software, especially
+C and C++ projects.
+
+It provides extensive compiler, toolchain, library, platform, and build-generator support. LiteBuild has a
+different focus: explicit command-driven data-processing pipelines rather than cross-platform software
+compilation.
+
+### Snakemake
+
+Snakemake is designed for **large scientific and computational workflows**.
+
+Its strengths include:
+
+* flexible rules and wildcard expansion;
+* dynamically generated jobs;
+* environment and container management;
+* CPU, memory, and resource scheduling;
+* cluster, HPC, and cloud execution; and
+* management of large numbers of datasets and jobs.
+
+Snakemake is a good fit when the goal is to manage **large, variable, or dynamically expanded scientific
+workloads**.
+
+LiteBuild deliberately does not provide wildcard-driven workflow expansion. Its focus is on keeping the
+configured dependency graph explicit and easy to inspect.
+
+### LiteBuild vs. Snakemake
+
+|                               | LiteBuild                                          | Snakemake                                           |
+|-------------------------------|----------------------------------------------------|-----------------------------------------------------|
+| Primary focus                 | **Explicit command-driven pipelines**              | **Complex scientific workflows**                    |
+| Workflow style                | Explicit named steps and dependencies              | Rules that can generate many jobs                   |
+| Command model                 | Templated CLI commands                             | Shell commands within a rich rule system            |
+| Dynamic expansion / wildcards | **Deliberately not supported**                     | **Core capability**                                 |
+| Profiles / ordered groups     | **First-class concepts**                           | Can be modeled through workflow/config mechanisms   |
+| Outputs                       | Mandatory single primary output per step           | Multiple outputs supported                          |
+| Parameters                    | **Hierarchical command configuration**             | Rich rule/config/wildcard system                    |
+| Execution model               | Dependency DAG + local parallelism                 | Dependency DAG + local/HPC/cloud execution          |
+| Design goal                   | **Keep the workflow explicit and easy to inspect** | **Express large and variable scientific workloads** |

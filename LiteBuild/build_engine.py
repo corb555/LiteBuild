@@ -1,7 +1,7 @@
 from concurrent.futures import ProcessPoolExecutor
 import datetime
 import difflib
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 import json
 import os
 from pathlib import Path
@@ -13,10 +13,13 @@ from typing import List, Dict, Tuple, NamedTuple, Optional
 import networkx as nx
 from YMLEditor.yaml_reader import ConfigLoader
 
+
+# build_engine.py
+
 from LiteBuild.build_logger import BuildLogger, setup_logger, get_logger
 from LiteBuild.command_generator import CommandGenerator
 from LiteBuild.dependency_graph import DependencyGraph
-from LiteBuild.schema import BUILD_SCHEMA, LiteBuildValidator
+from LiteBuild.schema import BUILD_SCHEMA, LiteBuildValidator, YAMLSection
 
 
 class UpdateCode(IntEnum):
@@ -58,14 +61,15 @@ class BuildEngine:
     ):
         """Initializes the BuildEngine, merging command-line variables into the config."""
         if cli_vars:
-            if "GENERAL" not in config_data:
-                config_data["GENERAL"] = {}
-            config_data["GENERAL"].update(cli_vars)
+            if YAMLSection.GENERAL not in config_data:
+                config_data[YAMLSection.GENERAL] = {}
+            config_data[YAMLSection.GENERAL].update(cli_vars)
 
         self.config = config_data
         self.state_file = state_file
+
         # Validate Input Directory
-        input_dir = config_data.get("GENERAL", {}).get("INPUT_DIRECTORY")
+        input_dir = config_data.get(YAMLSection.GENERAL, {}).get("INPUT_DIRECTORY")
         if input_dir:
             path = Path(input_dir)
             if not path.exists():
@@ -93,7 +97,7 @@ class BuildEngine:
             return cls(config_data, cli_vars=cli_vars, state_file=state_file)
         except (FileNotFoundError, ValueError) as e:
             # Re-raise to be handled by the calling script (CLI or GUI)
-            raise e
+            raise
 
     def execute(self, final_step_name: str, profile_name: str = "", logger: BuildLogger = None, status_callback=None, force_rebuild=False):
         """
@@ -103,59 +107,106 @@ class BuildEngine:
             logger = get_logger()
         setup_logger(logger)
 
-        # --- Extract Context info ---
-        general_cfg = self.config.get("GENERAL", {})
-        profile_cfg = self.config.get("PROFILES", {}).get(profile_name, {})
-
-        # Get (optional) segment/category from General  or Profile
-        segment = general_cfg.get("SEGMENT") or profile_cfg.get("SEGMENT") or ""
-        category = general_cfg.get("CATEGORY") or profile_cfg.get("CATEGORY") or ""
-
-        context_str = f"Segment: {segment}    Category: {category}  "
+        context_str = ""
         if profile_name:
             context_str += f" Profile: {profile_name}"
-
-        # Get the current date and time
-        #now = datetime.now()
 
         # Format the time as a string (HH:MM:SS) using strftime()
         current_time = "" #now.strftime("%H:%M:%S")
 
-        logger.log(f"🔵 Executing build for step {final_step_name} - {current_time}")
-        logger.log(f"ℹ️   {context_str}\n")
+        logger.log(f"\n🔵 Executing build for target step: {final_step_name} - {current_time}")
+        profile_display = profile_name or "none"
+        logger.log(f"ℹ️   Profile: {profile_display}\n")
 
         try:
             state_manager = BuildStateManager(self.state_file)
             planner = BuildPlanner(self.config, state_manager.load_state())
             plan = planner.plan_build(profile_name, final_step_name, force_rebuild=force_rebuild)
-
             executor = BuildExecutor(state_manager, self.config)
             success = executor.execute_plan(plan, logger, status_callback=status_callback)
         except Exception as e:
             success = False
             # ---  ERROR REPORTING ---
-            #logger.log(f"\n❌ ERROR")
-            logger.log(f"{e}")
-            #logger.log("\n--- Traceback ---")
-            #logger.log(traceback.format_exc())
+            logger.log(f"🔴{e}")
 
             # Update status callback if present
             if status_callback:
                 status_callback("step", 0, 0, "error")
-        # Get the current date and time
-        #now = datetime.now()
 
         # Format the time as a string (HH:MM:SS) using strftime()
         current_time = "" #now.strftime("%H:%M:%S")
 
         if success:
             logger.log(f"\n✅ Build finished successfully. {current_time}")
+            return True
         else:
             logger.log(f"🔴Build failed for {final_step_name}.  {current_time}")
+            return False
+        
+    def get_group_list(self) -> dict:
+        """Returns the PROFILE_GROUPS in the YAML config."""
+        return self.config.get(YAMLSection.PROFILE_GROUPS, {})
+
+    def get_profile_list(self) -> dict:
+        """Returns the PROFILES in the YAML config."""
+        return self.config.get(YAMLSection.PROFILES, {})
 
     def has_profile(self, profile_name: str) -> bool:
         """Checks if a specific profile key exists in the YAML config."""
-        return profile_name in self.config.get('PROFILES', {})
+        return profile_name in self.get_profile_list()
+
+    def resolve_profile_group(self, group_name: str) -> List[str]:
+        """Resolve a profile group into its ordered list of profile names.
+
+        Args:
+            group_name: Name of the PROFILE_GROUPS entry to resolve.
+
+        Returns:
+            Profile names in the order defined by the configuration.
+
+        Raises:
+            ValueError: If the group does not exist, is empty, or references
+                profiles that are not defined in PROFILES.
+        """
+        profile_groups = self.get_group_list()
+
+        if group_name not in profile_groups:
+            available = list(profile_groups.keys())
+            matches = difflib.get_close_matches(group_name, available, n=1, cutoff=0.6)
+            hint = f"\n   Did you mean '{matches[0]}'?" if matches else ""
+
+            if available:
+                available_text = "\n - ".join(available)
+                available_message = f"\nAvailable profile groups:\n - {available_text}"
+            else:
+                available_message = "\nNo profile groups are configured."
+
+            raise ValueError(
+                f"\nProfile Group '{group_name}' not found.{hint}"
+                f"{available_message}\n"
+            )
+
+        profiles = list(profile_groups[group_name])
+        if not profiles:
+            raise ValueError(
+                f"Profile Group '{group_name}' does not contain any profiles."
+            )
+
+        configured_profiles = self.get_profile_list()
+        missing_profiles = [
+            profile_name
+            for profile_name in profiles
+            if profile_name not in configured_profiles
+        ]
+
+        if missing_profiles:
+            missing_text = "\n - ".join(missing_profiles)
+            raise ValueError(
+                f"Profile Group '{group_name}' references undefined profiles:"
+                f"\n - {missing_text}\n"
+            )
+
+        return profiles
 
     def describe(self, profile_name: str) -> str:
         """Generates a Markdown description of the workflow for a given profile."""
@@ -172,7 +223,14 @@ class BuildPlanner:
         self.build_state = build_state
         self.logger = get_logger()
 
-    def _is_step_outdated(self, command: Dict, force_rebuild: bool = False) -> Tuple[UpdateCode, str]:
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Return a stable absolute path for DAG input/output comparison."""
+        return os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(path))))
+
+    def _is_step_outdated(
+            self, command: Dict, produced_outputs: set[str], force_rebuild: bool = False
+    ) -> Tuple[UpdateCode, str]:
         # 1. Force Check (Short Circuit)
         if force_rebuild:
             self.logger.debug(f"  - RESULT: Rebuild forced by user. (COMMAND_CHANGED)")
@@ -228,7 +286,18 @@ class BuildPlanner:
             for input_file in command['input_files']:
                 self.logger.debug(f"    - Checking input: '{input_file}'")
                 if not os.path.exists(input_file):
-                    self.logger.debug(f"    - RESULT: Input file does not exist. (MISSING_INPUT)")
+                    normalized_input = self._normalize_path(input_file)
+                    if normalized_input in produced_outputs:
+                        self.logger.debug(
+                            "    - RESULT: Input does not exist yet, but is produced by "
+                            "another step in this DAG."
+                        )
+                        continue
+
+                    self.logger.debug(
+                        "    - RESULT: Input file does not exist and is not produced by "
+                        "this DAG. (MISSING_INPUT)"
+                    )
                     raise FileNotFoundError(input_file)
 
                 input_mtime = os.path.getmtime(input_file)
@@ -255,11 +324,25 @@ class BuildPlanner:
         for node, cmd in command_map.items():
             cmd['node_name'] = node
 
+        produced_outputs = {
+            self._normalize_path(command["output"])
+            for command in command_map.values()
+        }
+
         initially_outdated = {}
         build_order = list(nx.topological_sort(execution_graph))
         for node_name in build_order:
             command = command_map[node_name]
-            update_code, context = self._is_step_outdated(command, force_rebuild=force_rebuild)
+            update_code, context = self._is_step_outdated(
+                command, produced_outputs, force_rebuild=force_rebuild
+            )
+
+            if update_code == UpdateCode.MISSING_INPUT:
+                raise FileNotFoundError(
+                    f"Cannot build step '{node_name}': required input '{context}' is missing "
+                    "and no step in the current build DAG creates it."
+                )
+
             if update_code != UpdateCode.UP_TO_DATE:
                 initially_outdated[node_name] = (update_code, context)
 
@@ -305,13 +388,14 @@ class BuildPlanner:
 
         graph_manager = DependencyGraph(self.config.get("WORKFLOW", {}))
         execution_graph = graph_manager.get_execution_subgraph(final_step_name)
-        general_config = self.config.get("GENERAL", {})
-        command_gen = CommandGenerator(general_config, profile_config)
+        general_config = self.config.get(YAMLSection.GENERAL, {})
+        parameters_config = self.config.get(YAMLSection.PARAMETERS, {})
+        command_gen = CommandGenerator(parameters_config, profile_config)
         context = {"profile_name": profile_name, **general_config, **profile_config}
 
         # Pre-process input files to create full paths automatically.
-        input_dir = context.get("INPUT_DIRECTORY")
         input_basenames = context.get("INPUT_FILES")
+        input_dir = context.get("INPUT_DIRECTORY", {})
 
         if input_dir and input_basenames:
             full_paths = [os.path.join(input_dir, f) for f in input_basenames]
@@ -321,7 +405,6 @@ class BuildPlanner:
         for node_name in nx.topological_sort(execution_graph):
             node_data = execution_graph.nodes[node_name]
 
-            # --- IMPROVED ERROR HANDLING ---
             try:
                 command_map[node_name] = command_gen.generate_for_node(
                     node_name, node_data, context, resolved_outputs
@@ -365,8 +448,11 @@ class BuildExecutor:
         if status_callback:
             status_callback("step", 0, total_to_run, "started")
 
-        for step in plan.steps_to_skip:
-            logger.log(f"Skipping '{step.node_name}' (up-to-date)")
+        if plan.steps_to_skip:
+            skipped = ", ".join(
+                step.node_name for step in plan.steps_to_skip
+            )
+            logger.log(f"⏭️  Skipping up-to-date steps:\n   {skipped}\n")
 
         if not plan.steps_to_run:
             if status_callback:
@@ -391,7 +477,7 @@ class BuildExecutor:
             if not tasks_this_generation:
                 continue
 
-            max_workers = self.config.get("GENERAL", {}).get("MAX_WORKERS")
+            max_workers = self.config.get(YAMLSection.GENERAL, {}).get("MAX_WORKERS")
             with ProcessPoolExecutor(
                     max_workers=max_workers, initializer=initializer, initargs=initargs
             ) as executor:
@@ -407,7 +493,7 @@ class BuildExecutor:
 
                 if status == 'EXECUTED':
                     finished_count += 1
-                    logger.log(f"✅ Finished step '{step_name}' [{finished_count}/{total_to_run}]")
+                    logger.log(f"✅ Finished step '{step_name}' [{finished_count}/{total_to_run}]\n")
                     if status_callback:
                         status_callback("step", finished_count, total_to_run, "done")
                     self.build_state[result_data['output_path']] = {
@@ -453,7 +539,7 @@ class BuildExecutor:
 
         # Log the command (Truncated)
         cmd_display = _truncate(command['cmd_string'])
-        logger.log(f"\n▶️  Running step '{step_name}': {update_text}")
+        logger.log(f"\n\n▶️  Running step '{step_name}': {update_text}")
         logger.log(f"  [{step_name}]       {cmd_display}")
 
         start_time = time.perf_counter()
@@ -559,7 +645,8 @@ class BuildReporter:
         """Generates a full Markdown report for the workflow."""
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        project_name = self.config.get("GENERAL", {}).get("PROJECT_NAME", "LiteBuild Project")
+        project_cfg = self.config.get(YAMLSection.PROJECT)
+        project_name = project_cfg.get("PROJECT_NAME", "LiteBuild Project")
 
         # 1. Generate the Plan to resolve all variables
         planner = BuildPlanner(self.config, {})
@@ -588,8 +675,9 @@ class BuildReporter:
         ]
 
         # --- OVERVIEW SECTION ---
-        # Checks for the global OVERVIEW key in the config
-        overview_text = self.config.get("OVERVIEW")
+        # Checks for the  OVERVIEW key in the config
+
+        overview_text = project_cfg.get("OVERVIEW")
         if overview_text:
             lines.append("## Overview")
             lines.append(overview_text.strip())

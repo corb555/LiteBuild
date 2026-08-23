@@ -26,7 +26,7 @@ LiteBuild uses a config file to:
 
 ## Config File
 
-> ⚠️**Config file names** must begin with the prefix `LB_` (e.g., `LB_classify.yml`).
+> ⚠️**Config file names** must begin with the prefix `BUILD_` (e.g., `BUILD_classify.yml`).
 > The file must include `config_type: "LiteBuild"`
 
 ## Configuration Sections
@@ -37,12 +37,13 @@ The config file is organized into three top-level sections: `GENERAL`,  `WORKFLO
 
 This section defines global variables available to the entire project.
 
-#### Required Keys:
+#### REQUIRED KEYS:
 
 > * `PROJECT_NAME`: A short identifier for the project (e.g., "WesternUS").
 > * `INPUT_DIRECTORY`: **(Special Key)** The base path for INPUT_FILES source data.
->    * *Behavior:* LiteBuild automatically joins this path with every filename listed in a profile's `INPUT_FILES` list.
->    * *Note:* If your files are absolute paths, you can set this to `""` (empty string).
+>    * *Behavior:* LiteBuild automatically joins this path with every filename listed in a profile's 
+>    * `INPUT_FILES` list.
+>    * *Note:* If your files have absolute paths, you can set this to `""` (empty string).
 
 #### Optional Keys:
 
@@ -87,8 +88,8 @@ Each key under `WORKFLOW` is the unique name of a `Workflow Step`.
 
 * `OUTPUT`: **(Required)** The **single**, primary output file that this step creates. Its existence and timestamp are used
   for incremental builds.
-* `REQUIRES`: A list of other **Workflow Step names** that must be completed *before* this step can run.
-* `INPUTS`: **(Required)** The single source of truth for all file-based inputs. This defines both the dependencies to
+* `REQUIRES`: A list of  **Workflow Step names** that must be completed *before* this step can run.
+* `INPUTS`: **(Required)** The  source  for all file-based inputs. This defines both the dependencies to
   track  changes and the files that will be formatted into the command line.
 * `PARAMETERS`: Parameters for this step's command. 
 * `DASH`: (Optional, defaults to `-`) The prefix used for parameters in the `{PARAMETERS}` block. Set this to `--` for 
@@ -185,7 +186,7 @@ These are special instructions **only used inside the `INPUTS` block** to build 
 
 ## How Commands Are Built: An Example
 
-This section explains how LiteBuild creates the final command for the `VRTFile` step when building the `USWest` profile.
+This section explains how LiteBuild creates the final command for a `VRTFile` step when building a `USWest` profile.
 
 ### 1. Start with the Command Template
 
@@ -196,7 +197,7 @@ LiteBuild begins with the `COMMAND` template from the `VRTFile` step's `RULE`:
 ### 2. Construct the Unformatted Input File List
 
 1. The `INPUTS` block contains `"{INPUT_FILES}"`.
-2. LiteBuild finds the `USWest` profile. It sees no `INPUT_DIRECTORY`, so it falls back to the `GENERAL` section's
+2. LiteBuild finds the `USWest` profile. It sees no `INPUT_DIRECTORY`, so it uses the `GENERAL` section's
    INPUT_DIRECTORY: `geodata/gmted_2010`.
 3. It combines this directory with the `INPUT_FILES` list from the profile.
 4. The final, unformatted list of files is:
@@ -272,6 +273,20 @@ You can override this behavior by setting the `DASH` key in the `RULE` block.
       NAME: "update_column"
       DASH: "--"  # Parameters will now look like: --target-column "rank"
       COMMAND: "update-column {PARAMETERS} ..."
+```
+
+### Suppress 'No Inputs' Warning
+Commands are normally required to have inputs.  LiteBuild will generate a warning if none are present:
+⚠️  Configuration Warning in WORKFLOW Step 'SetupDirs': No {INPUTS} or {POSITIONAL_FILENAMES} in COMMAND.
+
+If your command does not use input, you can suppress this with 'NO_INPUTS' as follows:
+
+```yaml
+    RULE:
+      NAME: setup_directories
+      COMMAND: mkdir -p {BUILD_DIR} {TEMP_DIR} {CACHE_DIR} && touch {OUTPUT}
+      NO_INPUTS: true
+
 ```
 
 ### Explicit Input Ordering

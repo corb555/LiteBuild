@@ -1,7 +1,7 @@
-# lite_build_runner.py
 import argparse
 import sys
 
+from LiteBuild.build_util import StatusMessage, StatusContext, StatusCode
 from PySide6.QtGui import QTextCursor, QCloseEvent, Qt
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QVBoxLayout,
                                QPushButton, QMessageBox, QTextEdit, QFileDialog, QHBoxLayout,
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLine
 
 from LiteBuild.build_workers import BuildWorker, BuildGroupWorker
 from LiteBuild.lite_build_controller import LiteBuildController
+# lite_build_runner.py
 
 class LiteBuildApp(QMainWindow):
     """The GUI application (View) for running LiteBuild."""
@@ -61,10 +62,9 @@ class LiteBuildApp(QMainWindow):
         self.step_input.setPlaceholderText("Optional target step")
 
         # "Run" buttons
-
         self.run_profile_button = QPushButton("▶ Run Profile")
         self.run_group_button = QPushButton("▶ Run Group")
-        self.run_step_button = QPushButton("▶ Run Step")
+        self.run_step_button = QPushButton("▶ Run to Step")
 
         # Add to Grid: addWidget(widget, row, col)
 
@@ -84,7 +84,7 @@ class LiteBuildApp(QMainWindow):
         # Empty space in col 2 for this row (or add a Clear button?)
 
         # Row 3: Step
-        grid.addWidget(QLabel("Step:"), 3, 0)
+        grid.addWidget(QLabel("To Step:"), 3, 0)
         grid.addWidget(self.step_input, 3, 1)
         grid.addWidget(self.run_step_button, 3, 2)
 
@@ -152,40 +152,43 @@ class LiteBuildApp(QMainWindow):
 
         # Status Connection
         self.controller.status_update.connect(self.update_status)
-
-    def update_status(self, context_type: str, current: int, total: int, status_code: str):
-        if context_type == "profile":
-            self.profile_total = total
-            self.profile_current = current
-            self._status_profile_msg = f"Profile {current} of {total}"
-            if status_code == "started":
-                self._status_step_msg = "Initializing steps..."
-                self.step_current = 0
-
-        elif context_type == "step":
-            if not self._status_profile_msg:
-                self._status_profile_msg = "Single Run"
-            self.step_total = max(1, total)
-            self.step_current = current
-            self._status_step_msg = f"Step {current} of {total} {status_code}"
-
-        # 1. Estimate total steps
-        estimated_total_steps = max(1, self.profile_total * self.step_total)
-
-        # 2. Calculate completed steps
-        profiles_finished = max(0, self.profile_current - 1)
-        done_steps = (profiles_finished * self.step_total) + self.step_current
-
-        # 3. Calculate Percentage
-        percent_done = int((done_steps / estimated_total_steps) * 100)
-        percent_done = max(1, min(100, percent_done))
-
-        # Update Text
-        full_text = f"{self._status_profile_msg}:   {self._status_step_msg}"
-        self.status_label.setText(full_text)
-
-        # Update Progress Bar
-        self.progress_bar.setValue(percent_done)
+        
+    def update_status(self, message: StatusMessage) -> None:
+            """Update the UI from a structured status message.
+    
+            Args:
+                message: Structured build status message.
+            """
+            if message.context_type == StatusContext.PROFILE:
+                self.profile_total = message.total
+                self.profile_current = message.current_task
+                self._status_profile_msg = f"Profile {message.current_task} of {message.total}"
+    
+                if message.status_code == StatusCode.STARTED:
+                    self._status_step_msg = "Initializing steps..."
+                    self.step_current = 0
+    
+            elif message.context_type == StatusContext.STEP:
+                if not self._status_profile_msg:
+                    self._status_profile_msg = "Single Run"
+    
+                self.step_total = max(1, message.total)
+                self.step_current = message.current_task
+                self._status_step_msg = (
+                    f"Step {message.current_task} of {message.total} {message.status_code}"
+                )
+    
+            estimated_total_steps = max(1, self.profile_total * self.step_total)
+    
+            profiles_finished = max(0, self.profile_current - 1)
+            done_steps = (profiles_finished * self.step_total) + self.step_current
+    
+            percent_done = int((done_steps / estimated_total_steps) * 100)
+            percent_done = max(1, min(100, percent_done))
+    
+            full_text = f"{self._status_profile_msg}:   {self._status_step_msg}"
+            self.status_label.setText(full_text)
+            self.progress_bar.setValue(percent_done)
 
     # --- Methods that delegate to the controller ---
     def start_profile_build(self):
@@ -286,13 +289,17 @@ class LiteBuildApp(QMainWindow):
             event.ignore()
         else:
             event.accept()
-if __name__ == "__main__":
+
+def main():
     app = QApplication(sys.argv)
     parser = argparse.ArgumentParser(description="LiteBuild GUI Runner")
-    parser.add_argument("config", help="Name of the config file (e.g., 'LB_config.yml').")
+    parser.add_argument("config", help="Name of the config file (e.g., 'BUILD_config.yml').")
     args = parser.parse_args()
 
     window = LiteBuildApp(args.config)
     window.resize(1200, 800)
     window.show()
     sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()

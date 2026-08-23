@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "LiteBuild"
-version = "0.5"
+version = "0.7"
 description = "Lightweight build engine"
 authors = [{ name = "corb" }]
 readme = { file = "docs/readme.md", content-type = "text/markdown" }
@@ -27,6 +27,7 @@ classifiers = [
 
 [project.scripts]
 LiteBuild = "LiteBuild.lite_build_runner:main"
+litebuild-cli = "LiteBuild.litebuild:main"
 
 [project.urls]
 Repository = "https://github.com/corb555/LiteBuild"
