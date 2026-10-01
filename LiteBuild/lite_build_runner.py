@@ -1,14 +1,16 @@
 import argparse
 import sys
 
-from LiteBuild.build_util import StatusMessage, StatusContext, StatusCode
 from PySide6.QtGui import QTextCursor, QCloseEvent, Qt
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QVBoxLayout,
                                QPushButton, QMessageBox, QTextEdit, QFileDialog, QHBoxLayout,
                                QCheckBox, QProgressBar, QGroupBox, QGridLayout)
 
+from LiteBuild.build_util import StatusMessage, StatusContext, StatusCode
 from LiteBuild.build_workers import BuildWorker, BuildGroupWorker
 from LiteBuild.lite_build_controller import LiteBuildController
+
+
 # lite_build_runner.py
 
 class LiteBuildApp(QMainWindow):
@@ -32,8 +34,7 @@ class LiteBuildApp(QMainWindow):
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.console_output.setStyleSheet(
-            "QTextEdit { background-color: #2b2b2b; color: #f0f0f0; font-family: monospace; }"
-        )
+            "QTextEdit { background-color: #2b2b2b; color: #f0f0f0; font-family: monospace; }")
 
         self._setup_ui()
         self._connect_signals()
@@ -47,7 +48,7 @@ class LiteBuildApp(QMainWindow):
         # --- 1. Input Section (Grid Layout) ---
         input_group = QGroupBox(" ")
         grid = QGridLayout()
-        grid.setVerticalSpacing(10) # Space between rows
+        grid.setVerticalSpacing(10)  # Space between rows
 
         # Define widgets
         self.profile_input = QLineEdit()
@@ -111,7 +112,7 @@ class LiteBuildApp(QMainWindow):
         self.describe_button = QPushButton("Describe Workflow")
 
         options_layout.addWidget(self.prevent_sleep_chk)
-        options_layout.addSpacing(15) # Visual separation
+        options_layout.addSpacing(15)  # Visual separation
         options_layout.addWidget(self.force_rebuild_chk)
         options_layout.addStretch()
         options_layout.addWidget(self.describe_button)
@@ -152,43 +153,42 @@ class LiteBuildApp(QMainWindow):
 
         # Status Connection
         self.controller.status_update.connect(self.update_status)
-        
+
     def update_status(self, message: StatusMessage) -> None:
-            """Update the UI from a structured status message.
-    
-            Args:
-                message: Structured build status message.
-            """
-            if message.context_type == StatusContext.PROFILE:
-                self.profile_total = message.total
-                self.profile_current = message.current_task
-                self._status_profile_msg = f"Profile {message.current_task} of {message.total}"
-    
-                if message.status_code == StatusCode.STARTED:
-                    self._status_step_msg = "Initializing steps..."
-                    self.step_current = 0
-    
-            elif message.context_type == StatusContext.STEP:
-                if not self._status_profile_msg:
-                    self._status_profile_msg = "Single Run"
-    
-                self.step_total = max(1, message.total)
-                self.step_current = message.current_task
-                self._status_step_msg = (
-                    f"Step {message.current_task} of {message.total} {message.status_code}"
-                )
-    
-            estimated_total_steps = max(1, self.profile_total * self.step_total)
-    
-            profiles_finished = max(0, self.profile_current - 1)
-            done_steps = (profiles_finished * self.step_total) + self.step_current
-    
-            percent_done = int((done_steps / estimated_total_steps) * 100)
-            percent_done = max(1, min(100, percent_done))
-    
-            full_text = f"{self._status_profile_msg}:   {self._status_step_msg}"
-            self.status_label.setText(full_text)
-            self.progress_bar.setValue(percent_done)
+        """Update the UI from a structured status message.
+
+        Args:
+            message: Structured build status message.
+        """
+        if message.context_type == StatusContext.PROFILE:
+            self.profile_total = message.total
+            self.profile_current = message.current_task
+            self._status_profile_msg = f"Profile {message.current_task} of {message.total}"
+
+            if message.status_code == StatusCode.STARTED:
+                self._status_step_msg = "Initializing steps..."
+                self.step_current = 0
+
+        elif message.context_type == StatusContext.STEP:
+            if not self._status_profile_msg:
+                self._status_profile_msg = "Single Run"
+
+            self.step_total = max(1, message.total)
+            self.step_current = message.current_task
+            self._status_step_msg = (
+                f"Step {message.current_task} of {message.total} {message.status_code}")
+
+        estimated_total_steps = max(1, self.profile_total * self.step_total)
+
+        profiles_finished = max(0, self.profile_current - 1)
+        done_steps = (profiles_finished * self.step_total) + self.step_current
+
+        percent_done = int((done_steps / estimated_total_steps) * 100)
+        percent_done = max(1, min(100, percent_done))
+
+        full_text = f"{self._status_profile_msg}:   {self._status_step_msg}"
+        self.status_label.setText(full_text)
+        self.progress_bar.setValue(percent_done)
 
     # --- Methods that delegate to the controller ---
     def start_profile_build(self):
@@ -209,18 +209,16 @@ class LiteBuildApp(QMainWindow):
         profile_name = self.profile_input.text().strip()
         step_name = self.step_input.text().strip()
         if not profile_name or not step_name:
-            QMessageBox.warning(
-                self, "Input Error", "Please provide both a Profile and a Step name."
-            )
+            QMessageBox.warning(self, "Input Error",
+                "Please provide both a Profile and a Step name.")
             return
         self._execute_build(BuildWorker, profile_name=profile_name, step_name=step_name)
 
     def _execute_build(self, worker_class, **kwargs):
         cli_vars = self.controller.parse_vars(self.vars_input.text())
         if cli_vars is None:
-            QMessageBox.warning(
-                self, "Input Error", "Build Variables must be in 'KEY=value' format."
-            )
+            QMessageBox.warning(self, "Input Error",
+                "Build Variables must be in 'KEY=value' format.")
             return
         self.console_output.clear()
         self.controller.start_build(worker_class, cli_vars=cli_vars, **kwargs)
@@ -228,30 +226,25 @@ class LiteBuildApp(QMainWindow):
     def describe_workflow(self):
         profile_name = self.profile_input.text().strip()
         if not profile_name:
-            QMessageBox.warning(
-                self, "Input Error", "A profile name is required to describe a workflow."
-            )
+            QMessageBox.warning(self, "Input Error",
+                "A profile name is required to describe a workflow.")
             return
         cli_vars = self.controller.parse_vars(self.vars_input.text())
         if cli_vars is None:
-            QMessageBox.warning(
-                self, "Input Error", "Build Variables must be in 'KEY=value' format."
-            )
+            QMessageBox.warning(self, "Input Error",
+                "Build Variables must be in 'KEY=value' format.")
             return
 
         markdown_content = self.controller.describe_workflow(profile_name, cli_vars)
         if markdown_content:
             suggested_filename = f"{profile_name}_Workflow.md"
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "Save Workflow Description", suggested_filename,
-                "Markdown Files (*.md);;All Files (*)"
-            )
+            file_path, _ = QFileDialog.getSaveFileName(self, "Save Workflow Description",
+                suggested_filename, "Markdown Files (*.md);;All Files (*)")
             if file_path:
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(markdown_content)
-                QMessageBox.information(
-                    self, "Success", f"Workflow description saved to:\n{file_path}"
-                )
+                QMessageBox.information(self, "Success",
+                    f"Workflow description saved to:\n{file_path}")
 
     # --- Slots for handling signals from the controller ---
     def on_build_started(self):
@@ -290,6 +283,7 @@ class LiteBuildApp(QMainWindow):
         else:
             event.accept()
 
+
 def main():
     app = QApplication(sys.argv)
     parser = argparse.ArgumentParser(description="LiteBuild GUI Runner")
@@ -300,6 +294,7 @@ def main():
     window.resize(1200, 800)
     window.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

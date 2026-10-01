@@ -2,23 +2,33 @@ import hashlib
 import json
 import re
 import shlex
-from typing import List, Any
+from typing import Any, List
+
+from LiteBuild.build_logger import get_logger
 
 
-
-#command_generator.py
+# command_generator.py
 
 class CommandGenerator:
-    """DOCString remains the same"""
+    """Resolve LiteBuild workflow configuration into executable command specs.
+
+    Command generation is intentionally quiet during normal operation. Invalid
+    configuration or unresolved templates raise descriptive exceptions so the
+    orchestration layer can log the failure once. The one non-fatal validation
+    case is when declared inputs are used only for dependency/freshness tracking
+    and are not consumed by the command string.
+    """
 
     class SafeFormatter(dict):
         """A dict subclass that returns the key itself if the key is missing."""
+
         def __missing__(self, key):
             return f"{{{key}}}"
 
     def __init__(self, parameters_config: dict, profile_config: dict):
         self.parameters_config = parameters_config
         self.profile_config = profile_config
+        self.logger = get_logger()
 
     def generate_for_node(
             self, node_name: str, node_data: dict, context: dict, resolved_outputs: dict
@@ -29,16 +39,15 @@ class CommandGenerator:
         for key, value in step_params.items():
             for placeholder in late_bound_placeholders:
                 if placeholder in str(value):
-                    error_msg = (f"❌ Configuration Error in WORKFLOW Step '{node_name}':\n"
-                                 f"The placeholder '{placeholder}' is not allowed inside the "
-                                 f"'PARAMETERS' block.")
-                    raise ValueError(error_msg)
+                    raise ValueError(
+                        f"WORKFLOW step '{node_name}': placeholder '{placeholder}' "
+                        "is not allowed inside the PARAMETERS block."
+                    )
 
         final_params = self._merge_parameters(node_name, node_data, context)
 
-        all_resolved_inputs = self._resolve_all_inputs(
-            node_name, node_data, context, resolved_outputs, self.profile_config
-        )
+        all_resolved_inputs = self._resolve_all_inputs(node_name, node_data, context,
+            resolved_outputs, self.profile_config)
 
         positional_filenames_templates = node_data.get("POSITIONAL_FILENAMES", [])
         if isinstance(positional_filenames_templates, str):
@@ -48,10 +57,10 @@ class CommandGenerator:
         rule_name = node_data['RULE']['NAME']
 
         if "{OUTPUT}" not in command_template:
-            error_msg = (f"❌ Configuration Error in WORKFLOW Step '{node_name}':\n"
-                         f"   The COMMAND template for rule '{rule_name}' is missing the required "
-                         f"{{OUTPUT}} placeholder.")
-            raise ValueError(error_msg)
+            raise ValueError(
+                f"WORKFLOW step '{node_name}': command template for rule "
+                f"'{rule_name}' is missing required {{OUTPUT}} placeholder."
+            )
 
         # Validate {INPUTS} and {POSITIONAL_FILENAMES}
         no_inputs_flag = node_data["RULE"]["NO_INPUTS"]
@@ -62,18 +71,26 @@ class CommandGenerator:
         has_positional_placeholder = "{POSITIONAL_FILENAMES}" in command_template
 
         if not no_inputs_flag and not has_inputs_placeholder and not has_positional_placeholder:
-            print(
-                f"⚠️  Configuration Warning in WORKFLOW Step '{node_name}': "
-                "No {INPUTS} or {POSITIONAL_FILENAMES} in COMMAND."
+            self.logger.warning(
+                f"WORKFLOW step '{node_name}' declares inputs but its command does not "
+                "reference {INPUTS} or {POSITIONAL_FILENAMES}. Inputs will still be "
+                "used for dependency and freshness tracking."
             )
 
         if final_params and "{PARAMETERS}" not in command_template:
-            raise ValueError(f"❌ Configuration Error in WORKFLOW Step '{node_name}': Parameters defined but {{PARAMETERS}} missing.")
+            raise ValueError(
+                f"WORKFLOW step '{node_name}': parameters are defined but the command "
+                "template does not contain {PARAMETERS}."
+            )
 
         if positional_filenames_templates and "{POSITIONAL_FILENAMES}" not in command_template:
-            raise ValueError(f"❌ Configuration Error in WORKFLOW Step '{node_name}': Positional filenames defined but placeholder missing.")
+            raise ValueError(
+                f"WORKFLOW step '{node_name}': positional filenames are defined but "
+                "the command template does not contain {POSITIONAL_FILENAMES}."
+            )
 
-        resolved_output_file = self._resolve_nested_template(node_name, node_data["OUTPUT"], context)
+        resolved_output_file = self._resolve_nested_template(node_name, node_data["OUTPUT"],
+                                                             context)
         resolved_outputs[node_name] = resolved_output_file
 
         command_hash = self._get_hash(command_template)
@@ -81,15 +98,12 @@ class CommandGenerator:
         params_hash = self._get_hash(final_params)
 
         local_context = {**context, 'INPUTS': all_resolved_inputs, 'OUTPUT': resolved_output_file}
-        resolved_positional_filenames = self._resolve_nested_template(
-            node_name, positional_filenames_templates, local_context
-        )
+        resolved_positional_filenames = self._resolve_nested_template(node_name,
+            positional_filenames_templates, local_context)
 
-        command_str = self._build_command_string(
-            node_name, rule_data=node_data["RULE"], inputs=all_resolved_inputs,
-            output=resolved_output_file, params=final_params,
-            positional_filenames=resolved_positional_filenames, context=context
-        )
+        command_str = self._build_command_string(node_name, rule_data=node_data["RULE"],
+            inputs=all_resolved_inputs, output=resolved_output_file, params=final_params,
+            positional_filenames=resolved_positional_filenames, context=context)
 
         return {
             "cmd_string": command_str, "input_files": all_resolved_inputs,
@@ -122,7 +136,10 @@ class CommandGenerator:
             if match:
                 dep_index = int(match.group(1))
                 if dep_index >= len(requires_list):
-                    raise ValueError(f"Error in '{node_name}': REQUIRES index [{dep_index}] is out of range.")
+                    raise ValueError(
+                        f"WORKFLOW step '{node_name}': REQUIRES index [{dep_index}] "
+                        "is out of range."
+                    )
                 dep_name = requires_list[dep_index]
                 all_inputs.append(resolved_outputs[dep_name])
                 continue
@@ -147,19 +164,17 @@ class CommandGenerator:
 
         if "{INPUTS}" in template and not re.search(r'{INPUTS\[\d+\]}', template):
             inputs_str = self._format_inputs_string(rule_data, inputs)
-            params_str = self._format_shell_params(
-                params, rule_data.get("DASH", "-"), rule_data.get("UNQUOTED_PARAMS", [])
-            )
+            params_str = self._format_shell_params(params, rule_data.get("DASH", "-"),
+                rule_data.get("UNQUOTED_PARAMS", []))
             positional_filenames_str = ""
         else:
             unquoted_positionals = rule_data.get("UNQUOTED_POSITIONALS", False)
             positional_filenames_str = " ".join(
-                [f for f in positional_filenames] if unquoted_positionals else
-                [shlex.quote(p) for p in positional_filenames]
-            )
-            params_str = self._format_shell_params(
-                params, rule_data.get("DASH", "-"), rule_data.get("UNQUOTED_PARAMS", [])
-            )
+                [f for f in positional_filenames] if unquoted_positionals else [shlex.quote(p) for p
+                                                                                in
+                                                                                positional_filenames])
+            params_str = self._format_shell_params(params, rule_data.get("DASH", "-"),
+                rule_data.get("UNQUOTED_PARAMS", []))
             inputs_str = " ".join([shlex.quote(p) for p in inputs])
 
         template_context = {
@@ -170,7 +185,10 @@ class CommandGenerator:
         def resolve_input_index(match: re.Match) -> str:
             input_index = int(match.group(1))
             if input_index >= len(inputs):
-                raise ValueError(f"Error in '{node_name}': INPUTS index [{input_index}] is out of range.")
+                raise ValueError(
+                    f"WORKFLOW step '{node_name}': INPUTS index [{input_index}] "
+                    "is out of range."
+                )
             return shlex.quote(inputs[input_index])
 
         final_template = re.sub(r'{INPUTS\[(\d+)\]}', resolve_input_index, template)
@@ -201,20 +219,20 @@ class CommandGenerator:
         if unresolved:
             bad_token = unresolved.group(0)
             raise ValueError(
-                f"\n❌ Configuration Error in WORKFLOW Step '{node_name}':\n"
-                f"   The generated command contains a placeholder that was not resolved.\n"
-                f"   Unresolved Token: {bad_token}\n"
-                f"   Command Template: \"{template}\""
+                f"WORKFLOW step '{node_name}': generated command contains unresolved "
+                f"placeholder {bad_token}.\n"
+                f"  Command template: \"{template}\""
             )
 
         try:
             shlex.split(resolved_command)
         except ValueError as e:
             raise ValueError(
-                f"\n❌ Configuration Error in WORKFLOW Step '{node_name}' COMMAND:\n"
-                f"   - Error: {e}\n   - Generated COMMAND: \n{resolved_command}\n"
-                f"   - Template: \n{template}\n"
-            )
+                f"WORKFLOW step '{node_name}': generated command is not valid shell syntax.\n"
+                f"  Error: {e}\n"
+                f"  Generated command: {resolved_command}\n"
+                f"  Command template: {template}"
+            ) from e
         return resolved_command
 
     def _format_inputs_string(self, rule_data: dict, inputs: List[str]) -> str:
@@ -226,7 +244,8 @@ class CommandGenerator:
         if style == 'switch':
             switch = rule_data.get('INPUT_SWITCH_NAME')
             if not switch:
-                raise ValueError("RULE must define 'INPUT_SWITCH_NAME' when using 'switch' INPUT_STYLE.")
+                raise ValueError(
+                    "RULE must define 'INPUT_SWITCH_NAME' when using 'switch' INPUT_STYLE.")
             parts = []
             for f in formatted_inputs:
                 parts.extend([switch, f])
@@ -265,34 +284,33 @@ class CommandGenerator:
                         templated_string = templated_string.format_map(safe_context)
                     except ValueError as e:
                         self._raise_formatting_error(e, node_name, prev_string)
-                except Exception as e:
-                    if isinstance(e, ValueError): raise e
+                except (FileNotFoundError, ValueError) as exc:
+                    if isinstance(exc, ValueError): raise exc
                     # This catches the iterative safety check failure
-                    missing_key = e.args[0]
+                    missing_key = exc.args[0]
                     raise ValueError(
-                        f"❌ Templating Error in '{node_name}':\n"
-                        f"   Could not resolve variable: '{missing_key}'\n"
-                        f"   Context: \"{prev_string}\""
-                    )
+                        f"WORKFLOW step '{node_name}': could not resolve template "
+                        f"variable '{missing_key}'.\n"
+                        f"  Context: \"{prev_string}\""
+                    ) from exc
 
             # --- FINAL VALIDATION ---
             try:
                 return templated_string.format_map(context)
             except KeyError as e:
                 missing_key = e.args[0]
-                # Improved User-Facing Error Message
+                #  User-Facing Error Message
                 raise ValueError(
-                    f"\n\n❌ Configuration Error in WORKFLOW Step -  '{node_name}':\n"
-                    f"   Parameter '{{{missing_key}}}' is not defined\n"
-                    f"   in the GENERAL or PROFILE settings.\n"
-                    f"   \n"
-                    f"   Problematic String: \"{data}\""
-                )
+                    f"WORKFLOW step '{node_name}': parameter '{{{missing_key}}}' is not "
+                    "defined in GENERAL or PROFILE settings.\n"
+                    f"  Template: \"{data}\""
+                ) from e
 
         if isinstance(data, list):
             return [self._resolve_nested_template(node_name, item, context) for item in data]
         if isinstance(data, dict):
-            return {k: self._resolve_nested_template(node_name, v, context) for k, v in data.items()}
+            return {k: self._resolve_nested_template(node_name, v, context) for k, v in
+                    data.items()}
         return data
 
     @staticmethod
@@ -300,49 +318,38 @@ class CommandGenerator:
         canonical_string = json.dumps(data, sort_keys=True)
         return hashlib.sha256(canonical_string.encode('utf-8')).hexdigest()
 
-
     @staticmethod
-    def _raise_formatting_error(e: ValueError, node_name: str, original_template: str, current_state: str = None):
-        """
-        Translates internal formatting errors into helpful LiteBuild configuration messages.
-        """
+    def _raise_formatting_error(
+            e: ValueError, node_name: str, original_template: str, current_state: str = None
+            ):
+        """Translate Python formatting errors into useful configuration errors."""
         msg = str(e)
 
-        # Base header
-        report = f"\n\n❌ Syntax Error in WORKFLOW Step '{node_name}':\n"
-
-        # 1. Handle the "Colon" error (Invalid format specifier)
         if "Invalid format specifier" in msg:
-            report += (
-                f"   The command template contains an invalid placeholder format.\n"
-                f"   There is a colon ':' inside a curly brace (e.g., {{aaa:bbb}}).\n\n"
+            explanation = (
+                "The command template contains an invalid placeholder format. "
+                "A colon ':' appears inside a curly-brace expression."
             )
-
-        # 2. Handle Missing/Extra Braces
         elif "Unmatched" in msg:
-            report += (
-                f"   The command template has unbalanced curly braces.\n"
-                f"   Reason: You have a missing closing '}}' or an extra opening '{{'.\n"
+            explanation = (
+                "The command template contains unbalanced curly braces."
             )
-
-        # 3. Handle Missing Keys (if SafeFormatter didn't catch it)
         elif "KeyError" in msg:
-            report += (
-                f"   The command references a variable that does not exist.\n"
-                f"   Error Details: {msg}\n"
+            explanation = (
+                "The command references a template variable that does not exist."
             )
-
-        # 4. Fallback for other errors
         else:
-            report += f"   LiteBuild could not process the template string.\n   Details: {msg}\n"
+            explanation = "LiteBuild could not process the command template."
 
-        # Show the Context
-        report += f"\n   --- Context ---\n"
-        report += f"   Original Template (YAML): \n     \"{original_template}\"\n"
+        report = (
+            f"WORKFLOW step '{node_name}': invalid command template.\n"
+            f"  {explanation}\n"
+            f"  Original template: \"{original_template}\""
+        )
 
         if current_state and current_state != original_template:
-            report += f"\n   Processed State (Before Crash): \n     \"{current_state}\"\n"
+            report += f"\n  Processed state: \"{current_state}\""
 
-        report += f"\n   Python Error: {msg}\n"
+        report += f"\n  Python error: {msg}"
 
         raise ValueError(report) from e

@@ -2,34 +2,53 @@
 
 import argparse
 import json
-import logging
 import sys
+import time
 import traceback
 from typing import Dict, List, Optional
 
 from LiteBuild.build_engine import BuildEngine
-from LiteBuild.build_logger import BuildLogger
+from LiteBuild.build_logger import BuildLogger, LogLevel
+from LiteBuild.status_emitter import StatusEmitter, emit_status
+from LiteBuild.status_message import (
+    BuildFinish,
+    BuildStart,
+    GroupFinish,
+    GroupStart,
+)
 
 
-def main():
-    """The CLI for running LiteBuild."""
+class _GroupProfileStatusEmitter:
+    """Forward profile execution status while suppressing nested build envelopes."""
+
+    def __init__(self, emitter: StatusEmitter) -> None:
+        self._emitter = emitter
+
+    def emit(self, message) -> None:
+        if isinstance(message, (BuildStart, BuildFinish)):
+            return
+        self._emitter.emit(message)
+
+
+def main() -> None:
+    """Run the LiteBuild command-line interface."""
     parser = argparse.ArgumentParser(
-        description="LiteBuild: A lightweight, dependency-aware build system for shell commands."
+        description="LiteBuild: a lightweight, dependency-aware build system for shell commands."
     )
 
     parser.add_argument(
         "config_file",
-        help="Path to the config.yml file (must start with 'BUILD_').",
+        help="Path to the LiteBuild configuration file.",
     )
 
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
         "--profile",
-        help="A named set of parameters to use for the build.",
+        help="Run one configured profile.",
     )
     target_group.add_argument(
         "--group",
-        help="A profile group to run sequentially.",
+        help="Run a configured profile group sequentially.",
     )
     target_group.add_argument(
         "--list-targets",
@@ -37,235 +56,330 @@ def main():
         help="Return configured profiles and profile groups as JSON.",
     )
 
-    parser.add_argument(
+    """ parser.add_argument(
         "--vars",
         nargs="+",
         metavar="KEY=value",
-        help="Space-separated KEY=value pairs.",
-    )
+        help="Space-separated configuration overrides.",
+    )"""
+
     parser.add_argument(
         "--step",
-        help="If provided, build only up to this specific step.",
+        help="Build only through the specified workflow step.",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Maximum workers. Default: 4.",
     )
     parser.add_argument(
         "--describe",
         action="store_true",
-        help="Generate a Markdown description of the workflow.",
+        help="Generate a description of the workflow.",
     )
     parser.add_argument(
-        "--output",
+        "--describe-output",
         "-o",
-        help="Path to save the description file (used with --describe).",
+        dest="describe_output",
+        help="Write the workflow description to this file.",
     )
     parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
-        help="Suppress informational messages.",
+        help="Suppress informational text logging.",
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Enable detailed debug logging.",
+        help="Enable detailed diagnostic text logging.",
+    )
+    parser.add_argument(
+        "--status-format",
+        choices=("ndjson",),
+        help="Emit structured build status to stderr.",
     )
 
     args = parser.parse_args()
 
+    _validate_cli_args(parser, args)
+
     if args.list_targets:
-        try:
-            if args.describe:
-                raise ValueError("--list-targets cannot be used with --describe.")
-            if args.vars:
-                raise ValueError("--list-targets does not support --vars.")
-            if args.step:
-                raise ValueError("--list-targets does not support --step.")
-            if args.output:
-                raise ValueError("--list-targets does not support --output.")
+        _list_targets(args.config_file)
+        return
 
-            engine = BuildEngine.from_file(args.config_file)
-
-            result = {
-                "ok": True,
-                "profiles": list(engine.get_profile_list().keys()),
-                "groups": list(engine.get_group_list().keys()),
-            }
-
-            print(json.dumps(result, indent=2))
-            return
-
-        except (FileNotFoundError, ValueError) as exc:
-            result = {
-                "ok": False,
-                "error": "configuration_error",
-                "message": str(exc),
-            }
-            print(json.dumps(result, indent=2))
-            sys.exit(1)
-
-        except Exception as exc:
-            result = {
-                "ok": False,
-                "error": "internal_error",
-                "message": str(exc),
-            }
-            print(json.dumps(result, indent=2))
-            sys.exit(1)
-
-    setup_logging(args.quiet, args.verbose)
-
-    if args.describe:
-        if args.group:
-            parser.error("--describe does not support --group.")
-        if not args.profile:
-            parser.error("--describe requires --profile.")
-    else:
-        if not args.profile and not args.group and not args.vars:
-            parser.error("A --profile, --group, or --vars must be provided to run a build.")
-
-    if args.group and args.step:
-        parser.error("--step is only supported with --profile, not --group.")
-
-    cli_vars = parse_cli_vars(args.vars)
+    """cli_vars = parse_cli_vars(args.vars)
     if cli_vars is None:
-        sys.exit(1)
+        sys.exit(1)"""
+    cli_vars = ""
 
-    logger = BuildLogger(sys.stdout)
-    success = False
+    log_level = _resolve_log_level(args.quiet, args.verbose)
+    logger = BuildLogger(sys.stdout, log_level=log_level)
+    status_emitter = StatusEmitter(sys.stderr) if args.status_format == "ndjson" else None
 
     try:
-        engine = BuildEngine.from_file(args.config_file, cli_vars=cli_vars)
-        project_cfg = engine.config.get("PROJECT")
+        engine = BuildEngine.from_file(args.config_file, cli_vars=cli_vars, max_workers=args.max_workers)
+        project_cfg = engine.config["PROJECT"]
 
         if args.describe:
-            description = engine.describe(profile_name=args.profile)
+            _run_describe(engine, args.profile, args.describe_output, logger)
+            return
 
-            if args.output:
-                with open(args.output, "w", encoding="utf-8") as file_obj:
-                    file_obj.write(description)
-                logging.info(f"Workflow description saved to: {args.output}")
-            else:
-                print(description)
+        final_step_name = _resolve_target_step(engine, args.step)
 
-            success = True
-
-        elif args.group:
-            profiles_to_run = engine.resolve_profile_group(args.group)
-
-            final_step_name = project_cfg.get("DEFAULT_WORKFLOW_STEP")
-            if not final_step_name:
-                raise ValueError(
-                    "No DEFAULT_WORKFLOW_STEP found in config for group execution."
-                )
-
-            total_profiles = len(profiles_to_run)
-
-            logging.info(f"Starting Profile Group: {args.group}")
-            logging.info(f"Profiles to run: {', '.join(profiles_to_run)}")
-
-            success = True
-
-            for index, profile_name in enumerate(profiles_to_run, start=1):
-                logging.info("")
-                logging.info("=" * 80)
-                logging.info(
-                    f"({index}/{total_profiles}) Running Profile: {profile_name}\n"
-                )
-
-                profile_engine = BuildEngine.from_file(
-                    args.config_file,
-                    cli_vars=cli_vars,
-                )
-
-                profile_success = profile_engine.execute(
-                    profile_name=profile_name,
-                    final_step_name=final_step_name,
-                    logger=logger,
-                )
-
-                if not profile_success:
-                    logging.error(
-                        f"Profile '{profile_name}' failed. "
-                        f"Stopping Profile Group '{args.group}'."
-                    )
-                    success = False
-                    break
-
-                logging.info(f"✅ Profile '{profile_name}' finished.")
-
-            if success:
-                logging.info("")
-                logging.info("=" * 80)
-                logging.info(
-                    f"✅ Profile Group '{args.group}' finished successfully."
-                )
+        if args.group:
+            success = _run_group(
+                config_file=args.config_file,
+                cli_vars=cli_vars,
+                engine=engine,
+                group_name=args.group,
+                final_step_name=final_step_name,
+                logger=logger,
+                status_emitter=status_emitter,
+            )
         else:
-            final_step_name = None
-
-            if args.step:
-                final_step_name = args.step
-                logging.info(f"Using workflow step: '{final_step_name}'")
-            elif "DEFAULT_WORKFLOW_STEP" in engine.config:
-                final_step_name = project_cfg.get("DEFAULT_WORKFLOW_STEP")
-                logging.info(
-                    f"Target step: '{final_step_name}' (from config file)"
-                )
-            else:
-                raise ValueError(
-                    "No workflow step specified. "
-                    "Please provide a final step with the --step flag, or set a "
-                    "DEFAULT_WORKFLOW_STEP in the PROJECT section of your configuration file."
-                )
-
-            profile_name = args.profile if args.profile else ""
-
+            profile_name = args.profile or ""
             success = engine.execute(
                 profile_name=profile_name,
                 final_step_name=final_step_name,
                 logger=logger,
+                status_emitter=status_emitter,
             )
 
-    except (FileNotFoundError, ValueError) as exc:
-        logging.error(f"A configuration error occurred:\n{exc}")
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        logger.blank()
+        logger.error(f"Configuration error: {exc}")
         sys.exit(1)
 
     except Exception as exc:
-        logging.error(f"{exc}")
-        logging.debug(traceback.format_exc())
+        logger.blank()
+        logger.error(str(exc))
+        logger.error(traceback.format_exc())
         sys.exit(1)
 
     if not success:
         sys.exit(1)
 
 
-def setup_logging(quiet: bool = False, verbose: bool = False):
-    """Configures the root logger for the application."""
-    level = logging.INFO
+def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Validate combinations that argparse cannot express directly."""
+    if args.list_targets:
+        if args.describe:
+            parser.error("--list-targets cannot be used with --describe.")
+        """if args.vars:
+            parser.error("--list-targets does not support --vars.")"""
+        if args.step:
+            parser.error("--list-targets does not support --step.")
+        if args.describe_output:
+            parser.error("--list-targets does not support --describe-output.")
+        if args.status_format:
+            parser.error("--list-targets does not emit build status.")
+        return
 
-    if quiet:
-        level = logging.WARNING
-    if verbose:
-        level = logging.DEBUG
+    if args.describe:
+        if args.group:
+            parser.error("--describe does not support --group.")
+        if not args.profile:
+            parser.error("--describe requires --profile.")
+        if args.status_format:
+            parser.error("--describe does not emit build status.")
+        return
 
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        stream=sys.stdout,
+    """if not args.profile and not args.group and not args.vars:
+        parser.error("A --profile, --group, or --vars build target must be provided.")"""
+
+    if args.group and args.step:
+        parser.error("--step is supported for profile builds, not group builds.")
+
+
+def _list_targets(config_file: str) -> None:
+    """Write configured profile and group names as JSON."""
+    try:
+        engine = BuildEngine.from_file(config_file)
+        result = {
+            "ok": True,
+            "profiles": list(engine.get_profile_list().keys()),
+            "groups": list(engine.get_group_list().keys()),
+        }
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        result = {
+            "ok": False,
+            "error": "configuration_error",
+            "message": str(exc),
+        }
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "error": "internal_error",
+            "message": str(exc),
+        }
+
+    print(json.dumps(result, indent=2))
+    if not result["ok"]:
+        sys.exit(1)
+
+
+def _run_describe(
+    engine: BuildEngine,
+    profile_name: str,
+    output_path: Optional[str],
+    logger: BuildLogger,
+) -> None:
+    """Generate or save a workflow description."""
+    description = engine.describe(profile_name=profile_name)
+
+    if output_path:
+        with open(output_path, "w", encoding="utf-8") as file_obj:
+            file_obj.write(description)
+        logger.info(f"Workflow description saved: {output_path}")
+    else:
+        print(description)
+
+
+def _resolve_target_step(engine: BuildEngine, explicit_step: Optional[str]) -> str:
+    """Resolve the requested final workflow step."""
+    if explicit_step:
+        return explicit_step
+
+    project_cfg = engine.config["PROJECT"]
+    final_step_name = project_cfg["DEFAULT_WORKFLOW_STEP"]
+    return final_step_name
+
+
+def _run_group(
+    *,
+    config_file: str,
+    cli_vars: Dict[str, str],
+    engine: BuildEngine,
+    group_name: str,
+    final_step_name: str,
+    logger: BuildLogger,
+    status_emitter: Optional[StatusEmitter],
+) -> bool:
+    """Run a configured profile group sequentially."""
+    profiles = engine.resolve_profile_group(group_name)
+    total_profiles = len(profiles)
+    group_start = time.perf_counter()
+
+    logger.blank()
+    logger.info("🔵 BUILD")
+    logger.info(f"   Target: {final_step_name}")
+    logger.info(f"ℹ️  GROUP  {group_name}")
+    logger.info(f"   Profiles: {', '.join(profiles)}")
+    logger.blank()
+
+    emit_status(
+        status_emitter,
+        BuildStart(target=final_step_name),
+    )
+    emit_status(
+        status_emitter,
+        GroupStart(
+            name=group_name,
+            index=1,
+            total=1,
+            profiles=tuple(profiles),
+        ),
     )
 
+    success = True
+    failure_text = ""
 
-def parse_cli_vars(
-    var_list: Optional[List[str]],
-) -> Optional[Dict[str, str]]:
-    """Parses a list of 'KEY=value' strings into a dictionary."""
+    for index, profile_name in enumerate(profiles, start=1):
+        profile_start = time.perf_counter()
+
+        logger.blank()
+        logger.info(f"   PROFILE  {profile_name} [{index}/{total_profiles}]")
+        logger.blank()
+
+        # Profile lifecycle status is emitted after planning, where the
+        # authoritative step counts are available.
+
+        profile_engine = BuildEngine.from_file(
+            config_file,
+            max_workers=engine.max_workers,
+            cli_vars=cli_vars,
+        )
+        profile_status_emitter = (
+            _GroupProfileStatusEmitter(status_emitter)
+            if status_emitter
+            else None
+        )
+
+        profile_success = profile_engine.execute(
+            profile_name=profile_name,
+            final_step_name=final_step_name,
+            logger=logger,
+            status_emitter=profile_status_emitter,
+            profile_index=index,
+            profile_total=total_profiles,
+        )
+
+        profile_elapsed = time.perf_counter() - profile_start
+
+        if profile_success:
+            logger.blank()
+            logger.info(f"✅ PROFILE COMPLETE  {profile_name}  {profile_elapsed:.2f}s")
+        else:
+            success = False
+            failure_text = f"Profile '{profile_name}' failed"
+            logger.blank()
+            logger.info(f"🔴 PROFILE FAILED  {profile_name}  {profile_elapsed:.2f}s")
+            break
+
+    group_elapsed = time.perf_counter() - group_start
+
+    logger.blank()
+    if success:
+        logger.info(f"✅ GROUP COMPLETE  {group_name}  {group_elapsed:.2f}s")
+        group_status_text = "Done"
+    else:
+        logger.info(f"🔴 GROUP FAILED  {group_name}  {group_elapsed:.2f}s")
+        group_status_text = failure_text or "Group failed"
+
+    emit_status(
+        status_emitter,
+        GroupFinish(
+            name=group_name,
+            success=success,
+            elapsed_s=group_elapsed,
+            status_text=group_status_text,
+        ),
+    )
+    emit_status(
+        status_emitter,
+        BuildFinish(
+            success=success,
+            elapsed_s=group_elapsed,
+            status_text="Done" if success else group_status_text,
+        ),
+    )
+
+    return success
+
+
+def _resolve_log_level(quiet: bool, verbose: bool) -> LogLevel:
+    """Resolve the requested human-readable logging level."""
+    if verbose:
+        return LogLevel.DEBUG
+    if quiet:
+        return LogLevel.WARNING
+    return LogLevel.INFO
+
+
+def parse_cli_vars(var_list: Optional[List[str]]) -> Optional[Dict[str, str]]:
+    """Parse command-line KEY=value configuration overrides."""
     if not var_list:
         return {}
 
     try:
         return dict(item.split("=", 1) for item in var_list)
     except ValueError:
-        logging.error(
-            "Invalid format for --vars. Use 'KEY=value' separated by spaces."
+        print(
+            "Invalid --vars format. Use space-separated KEY=value pairs.",
+            file=sys.stderr,
         )
         return None
 

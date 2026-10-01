@@ -1,18 +1,20 @@
-import subprocess
 import platform
+import subprocess
+
 
 class SleepInhibitor:
     """
     Prevents the OS from going to sleep during long tasks.
     Supports macOS (caffeinate) and Linux (systemd-inhibit).
     """
+
     def __init__(self):
         self._process = None
 
     def start(self):
         """Starts the keep-awake process."""
         if self._process:
-            return # Already running
+            return  # Already running
 
         system = platform.system()
 
@@ -22,13 +24,10 @@ class SleepInhibitor:
         elif system == "Linux":
             # Linux: Use systemd-inhibit to block idle sleep
             # We wrap 'sleep infinity' so the lock persists until we kill the process
-            cmd = [
-                "systemd-inhibit",
-                "--what=idle",           # Block system sleep, allow screen off
-                "--who=LiteBuild",       # Name of our app
-                "--why=Building Maps",   # Reason shown in logs
-                "--mode=block",
-                "sleep", "infinity"      # The dummy command to keep running
+            cmd = ["systemd-inhibit", "--what=idle",  # Block system sleep, allow screen off
+                "--who=LiteBuild",  # Name of our app
+                "--why=Building Maps",  # Reason shown in logs
+                "--mode=block", "sleep", "infinity"  # The dummy command to keep running
             ]
         else:
             print(f"⚠️  Sleep inhibitor not supported on {system}")

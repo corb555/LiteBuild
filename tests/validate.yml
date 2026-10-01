@@ -1,0 +1,14 @@
+tools:
+  gdalwarp:
+    command: gdalwarp
+    version_argument: --version
+    match_pattern: 'GDAL\s+(?P<version>[0-9]+(?:\.[0-9]+)+)'
+
+  rasterio:
+    command: rasterio
+    version_argument: --version
+    match_pattern: '^(?P<version>[0-9]+(?:\.[0-9]+)+)$'
+
+requires:
+  gdalwarp: '>=5.8, <9'
+  rasterio: '>=1.3, <2'

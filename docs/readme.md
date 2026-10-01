@@ -1,14 +1,21 @@
 
 # LiteBuild
 
-
-> THIS PROJECT IS
-**EXPERIMENTAL**. Features and Interfaces are still evolving.
+> **THIS PROJECT IS EXPERIMENTAL.**
+>
+> **DO NOT USE IN PRODUCTION.**
+>
+> Features and interfaces are evolving.
+>
+> **Updates will NOT be backward compatible.**
+>
+> **Back up your  files before use; bugs may corrupt project files.**
 
 `LiteBuild` is a lightweight, configuration-driven build system designed specifically for
-**data-processing pipelines and shell workflows**.  The goal is to make complex data pipelines **explicit, reproducible, 
-easy to inspect, and easy to modify**
-without requiring custom orchestration code.
+**data-processing pipelines and shell workflows**.  LiteBuild is a good fit for complex data pipelines that 
+need to remain explicit, reproducible, and understandable as they grow. It keeps workflow structure, dependencies, 
+command templates, and configuration in a declarative build definition rather than distributing that logic 
+across custom scripts.
 
 LiteBuild is optimized for workflows where the
 primary actions are **running templated shell commands** to transform data files, manipulate images, or
@@ -16,8 +23,11 @@ execute scientific-computing tasks.
 
 The complete workflow remains declarative rather than becoming a programming language. Project-specific
 build logic is kept in explicit, file-based configuration, while LiteBuild provides command templating,
-dependency tracking, incremental execution, parallel scheduling, profiles, and build-state management.
+dependency tracking, incremental execution, parallel scheduling, profiles, provenance tracking, and build-state management.
 
+LiteBuild deliberately constrains artifact flow so that each step has one principal output, which is propagated 
+automatically to downstream steps. This keeps DAGs simple, reduces file-wiring boilerplate, and encourages small, 
+composable tools rather than multi-purpose build stages.
 ---
 
 ## LiteBuild Key Features & Benefits
@@ -46,8 +56,8 @@ LiteBuild treats command parameters as part of the build definition.
 
 ### 3.  Dependency-Based Build Engine
 
-Like most modern build systems, LiteBuild determines what actually needs to run rather than simply executing every 
-configured step and executes steps in parallel when possible.
+Like most modern build systems, LiteBuild determines what actually needs to run rather than executing every configured step. 
+Independent steps run in parallel when possible.
 
 * **Parameter-Aware Incremental Builds:** LiteBuild tracks resolved commands, inputs, parameters, outputs,
   and file modification times. Changing an input, command, or processing parameter invalidates the affected
@@ -95,16 +105,61 @@ LiteBuild can run the same workflow against multiple named parameter sets.
 * **The Benefit:** A single workflow can support one-off builds, multiple variants, regional datasets, or
   complete production build sets without duplicating the dependency graph or command definitions.
 
+> NOTE: LiteBuild runs profiles serially to prevent any overwrites since the workflow is repeated.
+> The individual steps in a workflow can run concurrently and the user must ensure they are safe.
+
 ### 5. Automatic Workflow Documentation
 
 LiteBuild can generate a description of the configured workflow directly from the build definition.
 
 * It produces Markdown containing a Mermaid dependency diagram and the ordered commands represented by the
   configuration.
+* The report identifies source files that enter the workflow from outside the current dependency graph.
+* When provenance declarations are present, source files are grouped into documented data and configuration
+  sources. Undocumented source files are listed separately.
 * **The Benefit:** Documentation is generated from the same configuration that drives execution, reducing
   the chance that workflow documentation drifts away from the actual build.
 
-### 6. Flexible Invocation
+### 6. Source Provenance
+
+LiteBuild can document and validate the external files that enter a workflow.
+
+A **source file** is an input used by the resolved workflow that is not produced by another step in that same
+workflow. Source files can be data inputs or configuration files.
+
+The optional top-level `PROVENANCE` section associates source files or wildcard groups with human-readable
+descriptions:
+
+```yaml
+PROJECT:
+  PROVENANCE_CHECK: warn
+
+PROVENANCE:
+  usgs_dem:
+    INPUT: "{INPUT_DIRECTORY}/USGS_13*.tif"
+    DESCRIPTION: >
+      USGS 3DEP 1/3 arc-second elevation data.
+
+  color_ramps:
+    CONFIG: "{CONFIG_DIR}/*_color_ramp.txt"
+    DESCRIPTION: >
+      Color-ramp definition files used by the rendering pipeline.
+```
+
+`PROJECT/PROVENANCE_CHECK` controls provenance coverage validation:
+
+* `off` — provenance coverage is not checked. This is the default.
+* `warn` — missing provenance is reported as a warning.
+* `fail` — missing provenance causes validation to fail.
+
+Exact provenance paths take precedence over wildcard declarations. Multiple wildcard declarations matching the
+same source are treated as ambiguous.
+
+* **The Benefit:** LiteBuild records the external roots of the workflow while the dependency graph already
+  provides the transformation lineage for generated files. This avoids maintaining a separate provenance
+  database for intermediate artifacts.
+
+### 7. Flexible Invocation
 
 The same LiteBuild workflow can be used in several environments:
 
@@ -123,7 +178,17 @@ The same LiteBuild workflow can be used in several environments:
 These are the key sections in the configuration. `configuration.md` provides a detailed description of
 each.
 
-### 1. WORKFLOW
+### 1. PROJECT
+
+`PROJECT` defines project-level LiteBuild behavior.
+
+It contains settings that describe or control the build as a whole, including:
+
+* **OVERVIEW:** Human-readable description used by generated workflow documentation.
+* **DEFAULT_WORKFLOW_STEP:** Default target when no workflow step is specified.
+* **PROVENANCE_CHECK:** Controls source-provenance coverage checking with `off`, `warn`, or `fail`.
+
+### 2. WORKFLOW
 
 `WORKFLOW` defines the steps in the build and their dependency relationships.
 
@@ -146,7 +211,7 @@ LiteBuild resolves the input, output, and parameters when the step runs.
 This allows workflow steps to be chained by logical dependency rather than by embedding physical filenames
 throughout the configuration.
 
-### 2. GENERAL
+### 3. GENERAL
 
 `GENERAL` defines the shared environment for the build.
 
@@ -156,7 +221,7 @@ It can:
 * provide parameters available to all steps; and
 * define defaults that apply unless overridden by a Profile or individual Step.
 
-### 3. PROFILES
+### 4. PROFILES
 
 A Profile represents a particular build scenario or dataset.
 
@@ -173,20 +238,41 @@ case.
 
 The workflow itself remains unchanged.
 
+I’d make the division explicit right at the start:
+
+### 5. PROVENANCE
+
+LiteBuild automatically determines which files are **source files**: files consumed by the resolved workflow that are not produced by another step in that workflow.
+
+The user provides the provenance description for those source files in the optional `PROVENANCE` section.
+
+Each provenance entry contains:
+
+* exactly one of **INPUT** or **CONFIG**, identifying the source file or files;
+* a **DESCRIPTION** supplied by the user explaining the source.
+
+Entries may identify an exact path or a standard Unix-style wildcard pattern. A single declaration can therefore document a logical dataset made up of many physical files, such as a directory of DEM tiles.
+
+LiteBuild then:
+
+* matches the detected source files against the user-provided provenance declarations;
+* includes the source files and their descriptions in the generated workflow report;
+* identifies source files with no matching provenance declaration; and
+* when enabled by `PROJECT/PROVENANCE_CHECK`, warns or fails when provenance coverage is incomplete.
+
+The user does **not** document generated intermediate files. LiteBuild already knows their lineage from the workflow 
+, so explicit provenance is only needed for files entering the workflow from outside the workflow.
+
 ---
 
 ## LiteBuild and Other Build Systems
 
-LiteBuild intentionally focuses on a narrower problem than many general-purpose build and workflow systems.
-
-Its goal is not to provide every possible form of dynamic workflow construction. Instead, it emphasizes
-**explicit named steps, templated external commands, file dependencies, profiles, and predictable
-incremental builds**.
-
 ### LiteBuild
 
-LiteBuild is designed for **readable, file-oriented data-processing pipelines** built around external
-commands.
+LiteBuild is designed for building explicit, reproducible file-processing pipelines around command-line tools.
+It intentionally focuses on a narrower problem than many general-purpose build and workflow systems. Rather 
+than supporting every possible form of dynamic workflow construction, LiteBuild emphasizes explicit named steps, 
+templated commands, file dependencies, profiles, and predictable incremental builds.
 
 Its strengths include:
 
@@ -196,12 +282,14 @@ Its strengths include:
 * explicit dependency relationships;
 * logical step chaining;
 * profiles and profile groups;
+* source-file provenance reporting and validation;
 * automatic dependency-based parallel execution;
 * one primary output per step; and
 * easy-to-inspect workflow structure.
 
-LiteBuild is a good fit when the goal is to keep a complex data pipeline **explicit, reproducible, and easy
-to modify without turning the workflow definition into a programming language**.
+LiteBuild is a good fit for complex data pipelines that need to remain explicit, reproducible, and understandable 
+as they grow. It keeps workflow structure, dependencies, command templates, and configuration in a declarative 
+build definition rather than distributing that logic across custom scripts.
 
 ### CMake
 
@@ -233,14 +321,15 @@ configured dependency graph explicit and easy to inspect.
 
 ### LiteBuild vs. Snakemake
 
-|                               | LiteBuild                                          | Snakemake                                           |
-|-------------------------------|----------------------------------------------------|-----------------------------------------------------|
-| Primary focus                 | **Explicit command-driven pipelines**              | **Complex scientific workflows**                    |
-| Workflow style                | Explicit named steps and dependencies              | Rules that can generate many jobs                   |
-| Command model                 | Templated CLI commands                             | Shell commands within a rich rule system            |
-| Dynamic expansion / wildcards | **Deliberately not supported**                     | **Core capability**                                 |
-| Profiles / ordered groups     | **First-class concepts**                           | Can be modeled through workflow/config mechanisms   |
-| Outputs                       | Mandatory single primary output per step           | Multiple outputs supported                          |
-| Parameters                    | **Hierarchical command configuration**             | Rich rule/config/wildcard system                    |
-| Execution model               | Dependency DAG + local parallelism                 | Dependency DAG + local/HPC/cloud execution          |
-| Design goal                   | **Keep the workflow explicit and easy to inspect** | **Express large and variable scientific workloads** |
+|                               | LiteBuild                                                    | Snakemake                                                          |
+|-------------------------------|--------------------------------------------------------------|--------------------------------------------------------------------|
+| Primary focus                 | **Explicit command-driven pipelines**                        | **Complex scientific workflows**                                   |
+| Workflow style                | Explicit named steps and dependencies                        | Rules that can generate many jobs                                  |
+| Command model                 | Templated CLI commands                                       | Shell commands within a rich rule system                           |
+| Dynamic expansion / wildcards | **Deliberately not supported**                               | **Core capability**                                                |
+| Profiles / ordered groups     | **First-class concepts**                                     | Can be modeled through workflow/config mechanisms                  |
+| Provenance                    | **Built-in source-file provenance reporting and validation** | Can be modeled through workflow metadata, reports, or custom rules |
+| Outputs                       | _Mandatory single primary output per step_                   | Multiple outputs supported                                         |
+| Parameters                    | **Hierarchical command configuration**                       | Rich rule/config/wildcard system                                   |
+| Execution model               | Dependency DAG + local parallelism                           | Dependency DAG + local/HPC/cloud execution                         |
+| Design goal                   | **Keep the workflow explicit and easy to inspect**           | **Express large and variable scientific workloads**                |
