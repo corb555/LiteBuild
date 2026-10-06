@@ -19,6 +19,12 @@ class BuildPlanner:
     """Analyze per-context workflow state and produce an incremental build plan."""
 
     def __init__(self, config: Dict, build_state: Dict):
+        """Initialize the planner with the engine-loaded build-state snapshot.
+
+        ``BuildEngine`` owns state-file loading and validation. The same in-memory
+        state dictionary is subsequently handed to ``BuildExecutor``; the planner
+        treats it as read-only.
+        """
         self.config = config
         self.build_state = build_state
         self.logger = get_logger()
@@ -258,10 +264,13 @@ class BuildPlanner:
         """
         output_path = command["output"]
         node_name = command["node_name"]
+        profile_name = command.get("profile_name", "")
 
         self.logger.blank(level=LogLevel.DEBUG)
         self.logger.debug(f"PLAN  {node_name}")
-        self.logger.debug(f"    output: {output_path}")
+        self.logger.debug(
+            f"    profile: {profile_name or '<no profile>'}"
+        )
 
         if force_rebuild:
             self._debug_decision(ReasonCode.FORCED)
@@ -275,12 +284,22 @@ class BuildPlanner:
         self.logger.debug("    output exists: yes")
 
         stored_state = self.build_state.get(node_name)
+        self._debug_state_lookup(
+            profile_name=profile_name,
+            node_name=node_name,
+            stored_state=stored_state,
+        )
+        self._debug_output_state(
+            output_path=output_path,
+            stored_state=stored_state,
+        )
+
         if not stored_state:
             self.logger.debug("    tracked: no")
 
             output_mtime = os.path.getmtime(output_path)
             self.logger.debug(
-                "    bootstrap output mtime: "
+                "    bootstrap reference mtime: "
                 f"{output_mtime:.6f} ({time.ctime(output_mtime)})"
             )
 
@@ -317,34 +336,46 @@ class BuildPlanner:
         stored_hashes = stored_state.get("hashes", {})
         current_hashes = command["hashes"]
 
+        self._debug_hash_comparison(
+            label="command hash",
+            stored_value=stored_hashes.get("command"),
+            current_value=current_hashes.get("command"),
+        )
         if stored_hashes.get("command") != current_hashes.get("command"):
-            self.logger.debug("    command hash: changed")
             self._debug_decision(ReasonCode.COMMAND_CHANGED)
             return ReasonCode.COMMAND_CHANGED, ""
 
-        self.logger.debug("    command hash: match")
-
+        self._debug_hash_comparison(
+            label="input-list hash",
+            stored_value=stored_hashes.get("inputs"),
+            current_value=current_hashes.get("inputs"),
+        )
         if stored_hashes.get("inputs") != current_hashes.get("inputs"):
-            self.logger.debug("    input-list hash: changed")
             self._debug_decision(ReasonCode.INPUTS_CHANGED)
             return ReasonCode.INPUTS_CHANGED, ""
 
-        self.logger.debug("    input-list hash: match")
-
+        self._debug_hash_comparison(
+            label="parameter hash",
+            stored_value=stored_hashes.get("params"),
+            current_value=current_hashes.get("params"),
+        )
         if stored_hashes.get("params") != current_hashes.get("params"):
-            self.logger.debug("    parameter hash: changed")
             self._debug_decision(ReasonCode.PARAMS_CHANGED)
             return ReasonCode.PARAMS_CHANGED, ""
-
-        self.logger.debug("    parameter hash: match")
 
         # Preserve the existing small pause before filesystem timestamp checks.
         time.sleep(0.1)
 
         last_build_mtime = stored_state["mtime"]
         self.logger.debug(
-            "    output mtime: "
+            "    freshness reference from persisted state: "
             f"{last_build_mtime:.6f} ({time.ctime(last_build_mtime)})"
+        )
+
+        current_output_mtime = os.path.getmtime(output_path)
+        self.logger.debug(
+            "    current filesystem output mtime: "
+            f"{current_output_mtime:.6f} ({time.ctime(current_output_mtime)})"
         )
 
         reason_code, context = self._check_inputs_against_mtime(
@@ -374,6 +405,73 @@ class BuildPlanner:
         self.logger.debug(
             f"    reason: {reason_code.status_text(context)}"
         )
+
+    def _debug_state_lookup(
+        self,
+        *,
+        profile_name: str,
+        node_name: str,
+        stored_state: Dict | None,
+    ) -> None:
+        """Log the exact state lookup identity and whether a record was found."""
+        profile_text = profile_name or "<no profile>"
+        self.logger.debug("    state:")
+        self.logger.debug(f"      profile context: {profile_text}")
+        self.logger.debug(f"      record key: {node_name!r}")
+        self.logger.debug(
+            f"      record found: {'yes' if stored_state is not None else 'no'}"
+        )
+
+    def _debug_hash_comparison(
+        self,
+        *,
+        label: str,
+        stored_value: object,
+        current_value: object,
+    ) -> None:
+        """Log stored/current hash values without participating in the decision."""
+        self.logger.debug(f"    {label}:")
+        self.logger.debug(f"      stored:  {stored_value!r}")
+        self.logger.debug(f"      current: {current_value!r}")
+        self.logger.debug(
+            f"      match: {'yes' if stored_value == current_value else 'no'}"
+        )
+
+    def _debug_output_state(
+        self,
+        *,
+        output_path: str,
+        stored_state: Dict | None,
+    ) -> None:
+        """Log current filesystem output state beside persisted state metadata."""
+        self.logger.debug("    output state:")
+        self.logger.debug(f"      path: {output_path}")
+
+        if os.path.exists(output_path):
+            output_mtime = os.path.getmtime(output_path)
+            self.logger.debug("      exists: yes")
+            self.logger.debug(
+                "      filesystem mtime: "
+                f"{output_mtime:.6f} ({time.ctime(output_mtime)})"
+            )
+        else:
+            self.logger.debug("      exists: no")
+
+        if stored_state is None:
+            self.logger.debug("      persisted mtime: <no state record>")
+            return
+
+        stored_mtime = stored_state.get("mtime")
+        if stored_mtime is None:
+            self.logger.debug("      persisted mtime: <missing>")
+        else:
+            self.logger.debug(
+                "      persisted mtime: "
+                f"{stored_mtime:.6f} ({time.ctime(stored_mtime)})"
+            )
+
+        stored_output = stored_state.get("output")
+        self.logger.debug(f"      persisted output: {stored_output!r}")
 
     def _check_provenance(
         self,
@@ -442,6 +540,68 @@ class BuildPlanner:
 
         return analysis
 
+    def _validate_dependency_paths(
+        self,
+        command_map: Dict,
+        build_order: list[str],
+    ) -> dict[str, str]:
+        """Validate resolved input/output relationships for the selected build.
+
+        Returns a mapping of normalized output path to the step that owns it.
+        """
+        output_owners: dict[str, str] = {}
+
+        for node_name, command in command_map.items():
+            normalized_output = self._normalize_path(command["output"])
+            existing_owner = output_owners.get(normalized_output)
+
+            if existing_owner is not None:
+                raise ValueError(
+                    f"Workflow steps '{existing_owner}' and '{node_name}' "
+                    f"produce the same output: {command['output']}"
+                )
+
+            output_owners[normalized_output] = node_name
+
+            for input_file in command["input_files"]:
+                if self._normalize_path(input_file) == normalized_output:
+                    raise ValueError(
+                        f"Workflow step '{node_name}' uses the same file as both "
+                        f"input and output: {command['output']}"
+                    )
+
+        build_position = {
+            node_name: index
+            for index, node_name in enumerate(build_order)
+        }
+        warnings_emitted: set[tuple[str, str, str]] = set()
+
+        for reader_name in build_order:
+            command = command_map[reader_name]
+            for input_file in command["input_files"]:
+                normalized_input = self._normalize_path(input_file)
+                writer_name = output_owners.get(normalized_input)
+
+                if writer_name is None or writer_name == reader_name:
+                    continue
+
+                if build_position[writer_name] <= build_position[reader_name]:
+                    continue
+
+                warning_key = (reader_name, writer_name, normalized_input)
+                if warning_key in warnings_emitted:
+                    continue
+                warnings_emitted.add(warning_key)
+
+                self.logger.warning(
+                    f"Workflow step '{writer_name}' writes '{input_file}', which is "
+                    f"an input to earlier step '{reader_name}'. This may cause "
+                    f"'{reader_name}' to rebuild on the next run."
+                )
+
+        return output_owners
+
+
     def plan_build(
         self,
         profile_name: str,
@@ -458,26 +618,32 @@ class BuildPlanner:
 
         self._check_provenance(command_map, context)
 
+        self.logger.blank(level=LogLevel.DEBUG)
+        self.logger.debug("BUILD STATE")
+        self.logger.debug(
+            f"    profile context: {profile_name or '<no profile>'}"
+        )
+        self.logger.debug(
+            f"    records available: {len(self.build_state)}"
+        )
+        if self.build_state:
+            self.logger.debug(
+                "    lookup keys: "
+                + ", ".join(repr(key) for key in sorted(self.build_state))
+            )
+
         for node_name, command in command_map.items():
             command["node_name"] = node_name
+            command["profile_name"] = profile_name
 
-        output_owners: dict[str, str] = {}
-        for node_name, command in command_map.items():
-            normalized_output = self._normalize_path(command["output"])
-            existing_owner = output_owners.get(normalized_output)
-
-            if existing_owner is not None:
-                raise ValueError(
-                    f"Workflow steps '{existing_owner}' and '{node_name}' "
-                    f"produce the same output: {command['output']}"
-                )
-
-            output_owners[normalized_output] = node_name
-
+        build_order = list(nx.topological_sort(execution_graph))
+        output_owners = self._validate_dependency_paths(
+            command_map,
+            build_order,
+        )
         produced_outputs = set(output_owners)
 
         initially_outdated: dict[str, tuple[ReasonCode, str]] = {}
-        build_order = list(nx.topological_sort(execution_graph))
 
         for node_name in build_order:
             command = command_map[node_name]

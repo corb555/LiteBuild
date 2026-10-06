@@ -7,7 +7,7 @@ from typing import Dict, Optional, Type
 from PySide6.QtCore import QObject, QThread, Signal
 
 from LiteBuild.build_engine import BuildEngine
-from LiteBuild.build_logger import BuildLogger, setup_logger
+#from LiteBuild.build_logger import BuildLogger, setup_logger
 
 
 class LiteBuildController(QObject):

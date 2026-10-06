@@ -1,9 +1,9 @@
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import os
 import subprocess
 import time
 import traceback
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import networkx as nx
 
@@ -17,11 +17,122 @@ from LiteBuild.status_message import StepFinish, StepStart, StepsSkipped
 class BuildExecutor:
     """Execute a build plan, running independent DAG steps in parallel."""
 
-    def __init__(self, state_manager, config: Dict, max_workers: int):
+    def __init__(
+        self,
+        state_manager,
+        build_state: Dict,
+        config: Dict,
+        max_workers: int,
+        stop_token=None,
+    ):
         self.state_manager = state_manager
-        self.build_state = state_manager.load_state()
+        self.build_state = build_state
         self.config = config
         self.max_workers = max_workers
+        self.stop_token = stop_token
+        self.stopped = False
+
+    @staticmethod
+    def _state_key_for_step(step: BuildStep) -> str:
+        """Return the current persisted state key used by BuildExecutor.
+
+        Profile is logged separately as part of the logical state identity. The
+        persisted key format itself is intentionally not changed here; changing
+        that contract requires the planner/state-manager migration to happen at
+        the same time.
+        """
+        return step.node_name
+
+    @staticmethod
+    def _snapshot_file(path: str) -> dict[str, Any]:
+        """Return existence and mtime state for one dependency path."""
+        exists = os.path.exists(path)
+        return {
+            "path": path,
+            "exists": exists,
+            "mtime": os.path.getmtime(path) if exists else None,
+        }
+
+    @classmethod
+    def _snapshot_step_files(cls, command: Dict) -> list[dict[str, Any]]:
+        """Capture current state for the inputs and declared output of one step."""
+        paths = list(command.get("input_files", []))
+        output_path = command.get("output")
+        if output_path:
+            paths.append(output_path)
+
+        seen: set[str] = set()
+        snapshots: list[dict[str, Any]] = []
+        for path in paths:
+            normalized = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            snapshots.append(cls._snapshot_file(path))
+        return snapshots
+
+    @staticmethod
+    def _debug_file_changes(
+        logger: BuildLogger,
+        *,
+        step_name: str,
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+    ) -> None:
+        """Log dependency-file changes observed while one step executed."""
+        before_by_path = {item["path"]: item for item in before}
+        after_by_path = {item["path"]: item for item in after}
+
+        logger.debug(f"    execution file changes for {step_name}:")
+
+        changed = False
+        for path in sorted(set(before_by_path) | set(after_by_path)):
+            old = before_by_path.get(path, {"exists": False, "mtime": None})
+            new = after_by_path.get(path, {"exists": False, "mtime": None})
+
+            if old["exists"] == new["exists"] and old["mtime"] == new["mtime"]:
+                continue
+
+            changed = True
+            if not old["exists"] and new["exists"]:
+                change_text = "created"
+            elif old["exists"] and not new["exists"]:
+                change_text = "removed"
+            else:
+                change_text = "mtime changed"
+
+            logger.debug(f"      {change_text}: {path}")
+            logger.debug(
+                f"        before: exists={old['exists']} mtime={old['mtime']!r}"
+            )
+            logger.debug(
+                f"        after:  exists={new['exists']} mtime={new['mtime']!r}"
+            )
+
+        if not changed:
+            logger.debug("      no tracked file changes")
+
+    @staticmethod
+    def _debug_state_write(
+        logger: BuildLogger,
+        *,
+        step: BuildStep,
+        state_key: str,
+        command_hash: object,
+        reason: str,
+    ) -> None:
+        """Log one executor-side state write without influencing persistence."""
+        profile_name = step.command.get("profile_name", "")
+        profile_text = profile_name or "<no profile>"
+        logger.debug("    state write:")
+        logger.debug(f"      profile: {profile_text}")
+        logger.debug(f"      node: {step.node_name}")
+        logger.debug(
+            f"      logical identity: ({profile_text!r}, {step.node_name!r})"
+        )
+        logger.debug(f"      persisted key: {state_key!r}")
+        logger.debug(f"      command hash: {command_hash!r}")
+        logger.debug(f"      reason: {reason}")
 
     def execute_plan(
         self,
@@ -37,6 +148,11 @@ class BuildExecutor:
         Steps within the same DAG generation may execute concurrently. Their
         finish messages are therefore emitted in actual completion order rather
         than start order.
+
+        When a stop token is supplied, a stop request prevents any additional
+        steps from being dispatched. Already-running steps are allowed to finish.
+        At most ``max_workers`` futures are submitted at once so undispatched work
+        remains under LiteBuild's control until a worker slot becomes available.
         """
         total_to_run = len(plan.steps_to_run)
         step_timings: dict[str, float] = {}
@@ -55,11 +171,19 @@ class BuildExecutor:
                     continue
 
                 output_path = step.command["output"]
-                self.build_state[step.node_name] = {
+                state_key = self._state_key_for_step(step)
+                self.build_state[state_key] = {
                     "output": output_path,
                     "hashes": step.command["hashes"],
                     "mtime": os.path.getmtime(output_path),
                 }
+                self._debug_state_write(
+                    logger,
+                    step=step,
+                    state_key=state_key,
+                    command_hash=step.command["hashes"].get("command"),
+                    reason="adopted existing up-to-date output",
+                )
                 state_changed = True
 
             if state_changed:
@@ -92,6 +216,10 @@ class BuildExecutor:
         }
 
         for generation in nx.topological_generations(plan.execution_graph):
+            if self._stop_requested():
+                self.stopped = True
+                break
+
             steps_this_generation = [
                 tasks_to_run_map[node_name]
                 for node_name in generation
@@ -106,111 +234,161 @@ class BuildExecutor:
                 initializer=initializer,
                 initargs=initargs,
             ) as executor:
+                pending_steps = iter(steps_this_generation)
                 futures = {}
-
-                for step in steps_this_generation:
-                    step_index = step_indices[step.node_name]
-                    status_text = step.reason_code.status_text(step.context)
-                    logger.info("")
-                    logger.info(
-                        f"▶️  STEP {step.node_name} "
-                        f"[{step_index}/{total_to_run}] - {status_text}"
-                    )
-
-                    emit_status(
-                        status_emitter,
-                        StepStart(
-                            name=step.node_name,
-                            index=step_index,
-                            total=total_to_run,
-                            status_text=status_text,
-                            description=step.description,
-                        ),
-                    )
-                    future = executor.submit(
-                        self._run_single_command,
-                        (
-                            step.node_name,
-                            step.command,
-                        ),
-                    )
-                    futures[future] = step
-
                 generation_failed = False
+                generation_exhausted = False
 
-                for future in as_completed(futures):
-                    step = futures[future]
+                def dispatch_available_steps() -> None:
+                    """Fill available worker slots unless stopping was requested."""
+                    nonlocal generation_exhausted
 
-                    try:
-                        status, result_data = future.result()
-                    except Exception as exc:
-                        stack_text = traceback.format_exc().rstrip()
+                    while len(futures) < self.max_workers and not generation_exhausted:
+                        if self._stop_requested():
+                            self.stopped = True
+                            return
 
-                        logger.blank()
-                        logger.error(
-                            f"Unexpected executor failure while collecting step "
-                            f"'{step.node_name}': {type(exc).__name__}: {exc}"
-                        )
-                        logger.info(stack_text)
+                        try:
+                            step = next(pending_steps)
+                        except StopIteration:
+                            generation_exhausted = True
+                            return
 
-                        status = "FAILED"
-                        result_data = {
-                            "step_name": step.node_name,
-                            "elapsed_time": 0.0,
-                            "status_text": (
-                                f"Unexpected executor failure: "
-                                f"{type(exc).__name__}: {exc}"
-                            ),
-                        }
-
-                    step_name = result_data["step_name"]
-                    elapsed_s = float(result_data["elapsed_time"])
-                    step_timings[step_name] = elapsed_s
-
-                    if status == "EXECUTED":
+                        step_index = step_indices[step.node_name]
+                        status_text = step.reason_code.status_text(step.context)
+                        logger.info("")
                         logger.info(
-                            f"✅ STEP {step_name} — {elapsed_s:.2f}s"
+                            f"▶️  STEP {step.node_name} "
+                            f"[{step_index}/{total_to_run}] - {status_text}"
                         )
 
                         emit_status(
                             status_emitter,
-                            StepFinish(
-                                name=step_name,
-                                success=True,
-                                elapsed_s=elapsed_s,
-                                status_text="Done",
-                            ),
-                        )
-
-                        self.build_state[step_name] = {
-                            "output": result_data["output_path"],
-                            "hashes": result_data["hashes"],
-                            "mtime": result_data["mtime"],
-                        }
-                        # Save the success state
-                        self.state_manager.save_state(self.build_state)
-
-                    elif status == "FAILED":
-                        generation_failed = True
-                        status_text = result_data["status_text"]
-
-                        logger.blank()
-                        logger.error(f"STEP {step_name} failed")
-                        logger.info(f"    {status_text}")
-
-                        emit_status(
-                            status_emitter,
-                            StepFinish(
-                                name=step_name,
-                                success=False,
-                                elapsed_s=elapsed_s,
+                            StepStart(
+                                name=step.node_name,
+                                index=step_index,
+                                total=total_to_run,
                                 status_text=status_text,
                             ),
                         )
 
+                        future = executor.submit(
+                            self._run_single_command,
+                            (
+                                step.node_name,
+                                step.command,
+                            ),
+                        )
+                        futures[future] = step
+
+                dispatch_available_steps()
+
+                while futures:
+                    done, _pending = wait(
+                        tuple(futures),
+                        return_when=FIRST_COMPLETED,
+                    )
+
+                    for future in done:
+                        step = futures.pop(future)
+
+                        try:
+                            status, result_data = future.result()
+                        except Exception as exc:
+                            stack_text = traceback.format_exc().rstrip()
+
+                            logger.blank()
+                            logger.error(
+                                f"Unexpected executor failure while collecting step "
+                                f"'{step.node_name}': {type(exc).__name__}: {exc}"
+                            )
+                            logger.info(stack_text)
+
+                            status = "FAILED"
+                            result_data = {
+                                "step_name": step.node_name,
+                                "elapsed_time": 0.0,
+                                "status_text": (
+                                    f"Unexpected executor failure: "
+                                    f"{type(exc).__name__}: {exc}"
+                                ),
+                            }
+
+                        step_name = result_data["step_name"]
+                        elapsed_s = float(result_data["elapsed_time"])
+                        step_timings[step_name] = elapsed_s
+
+                        before_snapshot = result_data.get("before_snapshot")
+                        after_snapshot = result_data.get("after_snapshot")
+                        if before_snapshot is not None and after_snapshot is not None:
+                            self._debug_file_changes(
+                                logger,
+                                step_name=step_name,
+                                before=before_snapshot,
+                                after=after_snapshot,
+                            )
+
+                        if status == "EXECUTED":
+                            logger.info(
+                                f"✅ STEP {step_name} — {elapsed_s:.2f}s"
+                            )
+
+                            emit_status(
+                                status_emitter,
+                                StepFinish(
+                                    name=step_name,
+                                    success=True,
+                                    elapsed_s=elapsed_s,
+                                    status_text="Done",
+                                ),
+                            )
+
+                            state_key = self._state_key_for_step(step)
+                            self.build_state[state_key] = {
+                                "output": result_data["output_path"],
+                                "hashes": result_data["hashes"],
+                                "mtime": result_data["mtime"],
+                            }
+                            self._debug_state_write(
+                                logger,
+                                step=step,
+                                state_key=state_key,
+                                command_hash=result_data["hashes"].get("command"),
+                                reason="successful execution",
+                            )
+                            self.state_manager.save_state(self.build_state)
+
+                        elif status == "FAILED":
+                            generation_failed = True
+                            status_text = result_data["status_text"]
+
+                            logger.blank()
+                            logger.error(f"STEP {step_name} failed")
+                            logger.info(f"    {status_text}")
+
+                            emit_status(
+                                status_emitter,
+                                StepFinish(
+                                    name=step_name,
+                                    success=False,
+                                    elapsed_s=elapsed_s,
+                                    status_text=status_text,
+                                ),
+                            )
+
+                    if self._stop_requested():
+                        self.stopped = True
+                    elif not generation_failed:
+                        dispatch_available_steps()
+                    else:
+                        generation_exhausted = True
+
                 if generation_failed:
                     self.state_manager.save_state(self.build_state)
                     return False
+
+                if self.stopped:
+                    break
 
         self.state_manager.save_state(self.build_state)
 
@@ -218,6 +396,13 @@ class BuildExecutor:
         self._print_timing_report(logger, step_timings, total_build_time)
 
         return True
+
+    def _stop_requested(self) -> bool:
+        """Return whether cooperative stop has been requested."""
+        return bool(
+            self.stop_token is not None
+            and getattr(self.stop_token, "stop_requested", False)
+        )
 
     @staticmethod
     def _run_single_command(
@@ -238,6 +423,7 @@ class BuildExecutor:
 
         logger.info(f"    Command: {_truncate(cmd_string)}")
 
+        before_snapshot = BuildExecutor._snapshot_step_files(command)
         start_time = time.perf_counter()
 
         try:
@@ -265,24 +451,32 @@ class BuildExecutor:
             elapsed_s = time.perf_counter() - start_time
 
             if return_code != 0:
+                after_snapshot = BuildExecutor._snapshot_step_files(command)
                 return (
                     "FAILED",
                     {
                         "step_name": step_name,
                         "elapsed_time": elapsed_s,
                         "status_text": f"Command failed with exit code {return_code}",
+                        "before_snapshot": before_snapshot,
+                        "after_snapshot": after_snapshot,
                     },
                 )
 
             if not os.path.exists(output_path):
+                after_snapshot = BuildExecutor._snapshot_step_files(command)
                 return (
                     "FAILED",
                     {
                         "step_name": step_name,
                         "elapsed_time": elapsed_s,
                         "status_text": f"Expected output was not created: {output_path}",
+                        "before_snapshot": before_snapshot,
+                        "after_snapshot": after_snapshot,
                     },
                 )
+
+            after_snapshot = BuildExecutor._snapshot_step_files(command)
 
             return (
                 "EXECUTED",
@@ -298,6 +492,8 @@ class BuildExecutor:
                     "mtime": time.time(),
                     "elapsed_time": elapsed_s,
                     "status_text": "Done",
+                    "before_snapshot": before_snapshot,
+                    "after_snapshot": after_snapshot,
                 },
             )
 
@@ -312,6 +508,7 @@ class BuildExecutor:
             )
             logger.info(stack_text)
 
+            after_snapshot = BuildExecutor._snapshot_step_files(command)
             return (
                 "FAILED",
                 {
@@ -321,6 +518,8 @@ class BuildExecutor:
                         f"Unexpected tool-runner failure: "
                         f"{type(exc).__name__}: {exc}"
                     ),
+                    "before_snapshot": before_snapshot,
+                    "after_snapshot": after_snapshot,
                 },
             )
 

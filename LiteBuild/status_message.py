@@ -12,6 +12,19 @@ class BuildStart:
 
 
 @dataclass(frozen=True, slots=True)
+class BuildStopping:
+    status_text: str
+    event: str = field(default="build_stopping", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class BuildStopped:
+    elapsed_s: float
+    status_text: str
+    event: str = field(default="build_stopped", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class GroupStart:
     name: str
     index: int
@@ -44,7 +57,6 @@ class StepStart:
     total: int
     status_text: str
     event: str = field(default="step_start", init=False)
-    description: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +103,8 @@ class BuildFinish:
 
 StatusMessage: TypeAlias = (
     BuildStart
+    | BuildStopping
+    | BuildStopped
     | GroupStart
     | ProfileStart
     | StepsSkipped
@@ -105,6 +119,8 @@ StatusMessage: TypeAlias = (
 
 _MESSAGE_TYPES: dict[str, type[StatusMessage]] = {
     "build_start": BuildStart,
+    "build_stopping": BuildStopping,
+    "build_stopped": BuildStopped,
     "group_start": GroupStart,
     "profile_start": ProfileStart,
     "steps_skipped": StepsSkipped,

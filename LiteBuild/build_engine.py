@@ -1,13 +1,15 @@
 import difflib
+from enum import Enum, auto
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import tempfile
 
 from platformdirs import PlatformDirs
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Protocol
 
 from YMLEditor.yaml_reader import ConfigLoader
 
@@ -17,7 +19,7 @@ from LiteBuild.build_planner import BuildPlanner
 from LiteBuild.build_reporter import BuildReporter
 from LiteBuild.schema import BUILD_SCHEMA, LiteBuildValidator, YAMLSection
 from LiteBuild.status_emitter import StatusEmitter, emit_status
-from LiteBuild.status_message import BuildFinish, BuildStart, ProfileFinish, ProfileStart
+from LiteBuild.status_message import BuildFinish, BuildStart, BuildStopped, ProfileFinish, ProfileStart
 
 
 
@@ -55,9 +57,28 @@ def get_state_file(config_filepath: str | Path, profile_name: str = "") -> Path:
         context_name = _sanitize_state_component(profile_name)
     else:
         context_name = "_default"
+        print("[BUILD_ENGINE] WARNING - no profile name")
 
     filename = f"path_{path_hash}_{config_name}_{context_name}.json"
     return STATE_DIRECTORY / filename
+
+
+class StopTokenProtocol(Protocol):
+    """Minimal cooperative-stop contract consumed by the build engine."""
+
+    @property
+    def stop_requested(self) -> bool:
+        """Return whether no additional build steps should be started."""
+        ...
+
+
+class BuildResult(Enum):
+    """Outcome of one LiteBuild profile build."""
+
+    COMPLETED = auto()
+    STOPPED = auto()
+    FAILED = auto()
+
 
 
 class BuildEngine:
@@ -128,7 +149,8 @@ class BuildEngine:
         force_rebuild: bool = False,
         profile_index: int = 1,
         profile_total: int = 1,
-    ) -> bool:
+        stop_token: StopTokenProtocol | None = None,
+    ) -> BuildResult:
         """Plan and execute one LiteBuild build.
 
         Human-readable diagnostic output is written through ``BuildLogger``.
@@ -137,6 +159,14 @@ class BuildEngine:
         Profile/group lifecycle messages are owned by the higher-level
         orchestration layer. This method owns the build envelope and delegates
         step-level status to ``BuildExecutor``.
+
+        A cooperative stop request prevents the executor from dispatching new
+        steps while allowing already-running steps to finish. The returned
+        ``BuildResult`` distinguishes that condition from build failure.
+
+        Args:
+            stop_token: Optional cooperative-stop state shared with the caller
+                and ``BuildExecutor``.
 
         Raises:
             RuntimeError: If execution is requested without ``max_workers``.
@@ -162,7 +192,7 @@ class BuildEngine:
             BuildStart(target=final_step_name),
         )
 
-        success = False
+        result = BuildResult.FAILED
         failure_text = ""
 
         try:
@@ -174,7 +204,9 @@ class BuildEngine:
 
             state_file = get_state_file(self.config_filepath, profile_name)
             state_manager = BuildStateManager(state_file)
-            planner = BuildPlanner(self.config, state_manager.load_state())
+            build_state = state_manager.load_state()
+
+            planner = BuildPlanner(self.config, build_state)
             plan = planner.plan_build(
                 profile_name,
                 final_step_name,
@@ -194,54 +226,83 @@ class BuildEngine:
                 ),
             )
 
-            executor = BuildExecutor(state_manager, self.config, max_workers=self.max_workers)
-            success = executor.execute_plan(
+            executor = BuildExecutor(
+                state_manager,
+                build_state,
+                self.config,
+                max_workers=self.max_workers,
+                stop_token=stop_token,
+            )
+            execution_succeeded = executor.execute_plan(
                 plan,
                 logger,
                 status_emitter=status_emitter,
             )
 
-            if not success:
+            if not execution_succeeded:
+                result = BuildResult.FAILED
                 failure_text = f"Build failed for target '{final_step_name}'"
+            elif executor.stopped:
+                result = BuildResult.STOPPED
+            else:
+                result = BuildResult.COMPLETED
 
         except (FileNotFoundError, ValueError) as exc:
             failure_text = str(exc)
             logger.blank()
             logger.error(failure_text)
-            success = False
+            result = BuildResult.FAILED
 
         elapsed_s = time.perf_counter() - build_start
 
         logger.blank()
-        if success:
+        if result is BuildResult.COMPLETED:
             logger.info(f"✅ BUILD COMPLETE  {elapsed_s:.2f}s")
             status_text = "Done"
+            status_success = True
+        elif result is BuildResult.STOPPED:
+            logger.info(f"■ BUILD STOPPED  {elapsed_s:.2f}s")
+            status_text = "Stopped"
+            # The current status messages still expose only a success boolean.
+            # Step 4 adds explicit stopping/stopped protocol messages, so stopped
+            # must not be represented as a failure in the interim.
+            status_success = True
         else:
             status_text = failure_text or "Build failed"
             logger.info(f"🔴 BUILD FAILED  {elapsed_s:.2f}s")
             if failure_text:
                 logger.info(f"   {failure_text}")
+            status_success = False
 
         emit_status(
             status_emitter,
             ProfileFinish(
                 name=profile_name,
-                success=success,
+                success=status_success,
                 elapsed_s=elapsed_s,
                 status_text=status_text,
             ),
         )
+
+        if result is BuildResult.STOPPED:
+            emit_status(
+                status_emitter,
+                BuildStopped(
+                    elapsed_s=elapsed_s,
+                    status_text="Stopped",
+                ),
+            )
 
         emit_status(
             status_emitter,
             BuildFinish(
-                success=success,
+                success=status_success,
                 elapsed_s=elapsed_s,
                 status_text=status_text,
             ),
         )
 
-        return success
+        return result
 
     def get_group_list(self) -> dict:
         """Return configured profile groups."""
@@ -306,32 +367,135 @@ class BuildEngine:
 
 
 class BuildStateManager:
-    """Load and save LiteBuild incremental-build state."""
+    """Load, validate, and atomically save LiteBuild incremental-build state."""
 
     def __init__(self, state_file_path: str | Path):
         self.state_file_path = Path(state_file_path)
 
     def load_state(self) -> Dict:
-        """Load build state, returning an empty state if none is usable."""
-        if not os.path.exists(self.state_file_path):
+        """Load and validate build state.
+
+        A missing state file is the normal first-run case for a build/profile and
+        returns an empty state. Existing files must be readable, valid JSON, and
+        conform to the current state structure; failures are never silently
+        treated as an empty state.
+        """
+        if not self.state_file_path.exists():
             return {}
 
         try:
-            with open(self.state_file_path, "r", encoding="utf-8") as file_obj:
-                return json.load(file_obj)
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    def save_state(self, state: Dict) -> None:
-        """Persist build state."""
-        try:
-            self.state_file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.state_file_path, "w", encoding="utf-8") as file_obj:
-                json.dump(state, file_obj, indent=2)
+            with self.state_file_path.open("r", encoding="utf-8") as file_obj:
+                state = json.load(file_obj)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid LiteBuild state file '{self.state_file_path}': "
+                f"malformed JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+            ) from exc
         except OSError as exc:
             raise OSError(
-                f"Could not write to state file '{self.state_file_path}': {exc}"
+                f"Could not read LiteBuild state file '{self.state_file_path}': {exc}"
             ) from exc
+
+        self._validate_state(state)
+        return state
+
+    def _validate_state(self, state: object) -> None:
+        """Validate the existing state-file structure without changing its format."""
+        if not isinstance(state, dict):
+            raise ValueError(
+                f"Invalid LiteBuild state file '{self.state_file_path}': "
+                "top-level JSON value must be an object."
+            )
+
+        for node_name, record in state.items():
+            if not isinstance(node_name, str) or not node_name:
+                raise ValueError(
+                    f"Invalid LiteBuild state file '{self.state_file_path}': "
+                    "every state key must be a non-empty step name."
+                )
+
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"Invalid LiteBuild state for step '{node_name}' in "
+                    f"'{self.state_file_path}': state record must be an object."
+                )
+
+            missing = [
+                field for field in ("output", "hashes", "mtime")
+                if field not in record
+            ]
+            if missing:
+                raise ValueError(
+                    f"Invalid LiteBuild state for step '{node_name}' in "
+                    f"'{self.state_file_path}': missing required field(s): "
+                    + ", ".join(missing)
+                )
+
+            if not isinstance(record["output"], str) or not record["output"]:
+                raise ValueError(
+                    f"Invalid LiteBuild state for step '{node_name}' in "
+                    f"'{self.state_file_path}': 'output' must be a non-empty string."
+                )
+
+            hashes = record["hashes"]
+            if not isinstance(hashes, dict):
+                raise ValueError(
+                    f"Invalid LiteBuild state for step '{node_name}' in "
+                    f"'{self.state_file_path}': 'hashes' must be an object."
+                )
+
+            for hash_name in ("command", "inputs", "params"):
+                if hash_name not in hashes:
+                    raise ValueError(
+                        f"Invalid LiteBuild state for step '{node_name}' in "
+                        f"'{self.state_file_path}': missing hash '{hash_name}'."
+                    )
+                if not isinstance(hashes[hash_name], str) or not hashes[hash_name]:
+                    raise ValueError(
+                        f"Invalid LiteBuild state for step '{node_name}' in "
+                        f"'{self.state_file_path}': hash '{hash_name}' must be "
+                        "a non-empty string."
+                    )
+
+            mtime = record["mtime"]
+            if isinstance(mtime, bool) or not isinstance(mtime, (int, float)):
+                raise ValueError(
+                    f"Invalid LiteBuild state for step '{node_name}' in "
+                    f"'{self.state_file_path}': 'mtime' must be numeric."
+                )
+
+    def save_state(self, state: Dict) -> None:
+        """Atomically persist build state using the existing JSON format."""
+        self._validate_state(state)
+        self.state_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.state_file_path.parent,
+                prefix=f".{self.state_file_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as file_obj:
+                temp_path = Path(file_obj.name)
+                json.dump(state, file_obj, indent=2)
+                file_obj.flush()
+                os.fsync(file_obj.fileno())
+
+            os.replace(temp_path, self.state_file_path)
+            temp_path = None
+        except OSError as exc:
+            raise OSError(
+                f"Could not write LiteBuild state file '{self.state_file_path}': {exc}"
+            ) from exc
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def setup_worker_logger(logger: BuildLogger) -> None:

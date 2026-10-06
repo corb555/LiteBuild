@@ -47,11 +47,14 @@ class BuildLogger:
         self.is_file_based = isinstance(output, (str, Path))
         self.log_file_handle: Any
         self.lock: Any
+        self.lock_file: Optional[Path] = None
+        self._closed = False
 
         if self.is_file_based:
             log_file = Path(output)
             self.log_file_handle = open(log_file, "a", encoding="utf-8")
-            self.lock = FileLock(log_file.with_suffix(".lock"))
+            self.lock_file = log_file.with_name(f"._{log_file.name}.lock")
+            self.lock = FileLock(self.lock_file)
         elif hasattr(output, "write") and hasattr(output, "flush"):
             self.log_file_handle = output
             self.lock = nullcontext()
@@ -107,6 +110,42 @@ class BuildLogger:
         if show_level:
             message = f"❌ ERROR  {message}"
         self.log(message, level=LogLevel.ERROR)
+
+    def close(self) -> None:
+        """Close the file logger and remove its lock file.
+
+        The owning application should call this only after all worker processes that
+        share the log file have stopped. The lock-file name is validated before
+        deletion as a safeguard against removing an unrelated file.
+        """
+        if self._closed:
+            return
+
+        if not self.is_file_based:
+            self._closed = True
+            return
+
+        with self.lock:
+            if not self.log_file_handle.closed:
+                self.log_file_handle.close()
+
+        if self.lock_file is None:
+            raise RuntimeError("File-based logger has no lock-file path")
+
+        lock_name = self.lock_file.name
+        if not (lock_name.startswith("._") and lock_name.endswith(".lock")):
+            raise RuntimeError(
+                f"Refusing to delete unexpected logger lock file: {self.lock_file}"
+            )
+
+        try:
+            self.lock_file.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Unable to remove logger lock file '{self.lock_file}': {exc}"
+            ) from exc
+
+        self._closed = True
 
     def get_worker_init_info(self) -> Optional[Tuple[Callable, Tuple[Any, ...]]]:
         """Return process-pool logger initialization when logging to a file."""

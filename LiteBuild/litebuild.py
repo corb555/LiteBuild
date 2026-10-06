@@ -3,29 +3,98 @@
 import argparse
 import json
 import sys
+import threading
 import time
 import traceback
 from typing import Dict, List, Optional
 
-from LiteBuild.build_engine import BuildEngine
+from LiteBuild.build_engine import BuildEngine, BuildResult
 from LiteBuild.build_logger import BuildLogger, LogLevel
 from LiteBuild.status_emitter import StatusEmitter, emit_status
 from LiteBuild.status_message import (
     BuildFinish,
     BuildStart,
+    BuildStopped,
+    BuildStopping,
     GroupFinish,
     GroupStart,
 )
 
 
+class StopToken:
+    """Thread-safe cooperative stop state shared across the active build."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    @property
+    def stop_requested(self) -> bool:
+        """Return whether the user has requested that no new steps start."""
+        return self._event.is_set()
+
+    def request_stop(self) -> None:
+        """Prevent future step dispatch without interrupting running steps."""
+        self._event.set()
+
+
+def _start_control_reader(
+    stop_token: StopToken,
+    status_emitter: StatusEmitter | None,
+) -> threading.Thread:
+    """Start the daemon that receives NDJSON control messages from stdin."""
+    thread = threading.Thread(
+        target=_read_control_messages,
+        args=(stop_token, status_emitter),
+        name="litebuild-control",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _read_control_messages(
+    stop_token: StopToken,
+    status_emitter: StatusEmitter | None,
+) -> None:
+    """Read newline-delimited JSON control commands from stdin.
+
+    Supported messages:
+        {"command": "stop"}
+
+    Malformed or unknown messages are ignored. A newly accepted stop request is
+    acknowledged immediately on the structured status stream.
+    """
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(message, dict):
+            continue
+
+        if message.get("command") != "stop" or stop_token.stop_requested:
+            continue
+
+        stop_token.request_stop()
+        emit_status(
+            status_emitter,
+            BuildStopping(status_text="Stopping"),
+        )
+
+
 class _GroupProfileStatusEmitter:
-    """Forward profile execution status while suppressing nested build envelopes."""
+    """Forward  execution status while suppressing nested build envelopes."""
 
     def __init__(self, emitter: StatusEmitter) -> None:
         self._emitter = emitter
 
     def emit(self, message) -> None:
-        if isinstance(message, (BuildStart, BuildFinish)):
+        if isinstance(message, (BuildStart, BuildStopped, BuildFinish)):
             return
         self._emitter.emit(message)
 
@@ -129,8 +198,11 @@ def main() -> None:
 
         final_step_name = _resolve_target_step(engine, args.step)
 
+        stop_token = StopToken()
+        _start_control_reader(stop_token, status_emitter)
+
         if args.group:
-            success = _run_group(
+            outcome = _run_group(
                 config_file=args.config_file,
                 cli_vars=cli_vars,
                 engine=engine,
@@ -138,14 +210,16 @@ def main() -> None:
                 final_step_name=final_step_name,
                 logger=logger,
                 status_emitter=status_emitter,
+                stop_token=stop_token,
             )
         else:
             profile_name = args.profile or ""
-            success = engine.execute(
+            outcome = engine.execute(
                 profile_name=profile_name,
                 final_step_name=final_step_name,
                 logger=logger,
                 status_emitter=status_emitter,
+                stop_token=stop_token,
             )
 
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
@@ -159,7 +233,10 @@ def main() -> None:
         logger.error(traceback.format_exc())
         sys.exit(1)
 
-    if not success:
+    finally:
+        logger.close()
+
+    if outcome is BuildResult.FAILED:
         sys.exit(1)
 
 
@@ -186,9 +263,6 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         if args.status_format:
             parser.error("--describe does not emit build status.")
         return
-
-    """if not args.profile and not args.group and not args.vars:
-        parser.error("A --profile, --group, or --vars build target must be provided.")"""
 
     if args.group and args.step:
         parser.error("--step is supported for profile builds, not group builds.")
@@ -257,7 +331,8 @@ def _run_group(
     final_step_name: str,
     logger: BuildLogger,
     status_emitter: Optional[StatusEmitter],
-) -> bool:
+    stop_token: StopToken,
+) -> BuildResult:
     """Run a configured profile group sequentially."""
     profiles = engine.resolve_profile_group(group_name)
     total_profiles = len(profiles)
@@ -284,10 +359,14 @@ def _run_group(
         ),
     )
 
-    success = True
+    outcome = BuildResult.COMPLETED
     failure_text = ""
 
     for index, profile_name in enumerate(profiles, start=1):
+        if stop_token.stop_requested:
+            outcome = BuildResult.STOPPED
+            break
+
         profile_start = time.perf_counter()
 
         logger.blank()
@@ -315,15 +394,22 @@ def _run_group(
             status_emitter=profile_status_emitter,
             profile_index=index,
             profile_total=total_profiles,
+            stop_token=stop_token,
         )
 
         profile_elapsed = time.perf_counter() - profile_start
+        profile_outcome = profile_success
 
-        if profile_success:
+        if profile_outcome is BuildResult.COMPLETED:
             logger.blank()
             logger.info(f"✅ PROFILE COMPLETE  {profile_name}  {profile_elapsed:.2f}s")
+        elif profile_outcome is BuildResult.STOPPED:
+            outcome = BuildResult.STOPPED
+            logger.blank()
+            logger.info(f"■ PROFILE STOPPED  {profile_name}  {profile_elapsed:.2f}s")
+            break
         else:
-            success = False
+            outcome = BuildResult.FAILED
             failure_text = f"Profile '{profile_name}' failed"
             logger.blank()
             logger.info(f"🔴 PROFILE FAILED  {profile_name}  {profile_elapsed:.2f}s")
@@ -332,32 +418,49 @@ def _run_group(
     group_elapsed = time.perf_counter() - group_start
 
     logger.blank()
-    if success:
+    if outcome is BuildResult.COMPLETED:
         logger.info(f"✅ GROUP COMPLETE  {group_name}  {group_elapsed:.2f}s")
         group_status_text = "Done"
+        status_success = True
+    elif outcome is BuildResult.STOPPED:
+        logger.info(f"■ GROUP STOPPED  {group_name}  {group_elapsed:.2f}s")
+        group_status_text = "Stopped"
+        # The current status protocol has only success/failure. Step 4 adds
+        # explicit stopping/stopped messages; until then, stopped is not failure.
+        status_success = True
     else:
         logger.info(f"🔴 GROUP FAILED  {group_name}  {group_elapsed:.2f}s")
         group_status_text = failure_text or "Group failed"
+        status_success = False
 
     emit_status(
         status_emitter,
         GroupFinish(
             name=group_name,
-            success=success,
+            success=status_success,
             elapsed_s=group_elapsed,
             status_text=group_status_text,
         ),
     )
+    if outcome is BuildResult.STOPPED:
+        emit_status(
+            status_emitter,
+            BuildStopped(
+                elapsed_s=group_elapsed,
+                status_text="Stopped",
+            ),
+        )
+
     emit_status(
         status_emitter,
         BuildFinish(
-            success=success,
+            success=status_success,
             elapsed_s=group_elapsed,
-            status_text="Done" if success else group_status_text,
+            status_text=group_status_text,
         ),
     )
 
-    return success
+    return outcome
 
 
 def _resolve_log_level(quiet: bool, verbose: bool) -> LogLevel:
